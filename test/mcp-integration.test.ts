@@ -72,10 +72,13 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     expect(autoApproved.isError).not.toBe(true);
 
     const recorded = await stateFor(port, token);
-    const change = recorded.changes.find((item) => item.summary.includes(target));
-    expect(change).toBeDefined();
-    await post(port, token, `/api/changes/${change!.id}/undo`);
+    expect(recorded.changeSets).toHaveLength(1);
+    expect(recorded.changeSets[0].actionCount).toBe(2);
+    await post(port, token, `/api/change-sets/${recorded.changeSets[0].id}/undo`);
     expect(await readFile(target, "utf8")).toBe("original\n");
+    await expect(readFile(path.join(root, "second.txt"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   } finally {
     await transport.close();
   }
@@ -84,6 +87,7 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
 interface UiState {
   pending: Array<{ id: string }>;
   changes: Array<{ id: string; summary: string }>;
+  changeSets: Array<{ id: string; actionCount: number }>;
 }
 
 async function stateFor(port: number, token: string): Promise<UiState> {

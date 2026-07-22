@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger } from "./ledger.js";
 import type { ChangeRecord } from "./model.js";
@@ -77,6 +78,55 @@ describe("RewindService", () => {
 
     expect(await readFile(path.join(source, "a.txt"), "utf8")).toBe("content");
   });
+
+  it("undoes multiple writes to the same path as one change set", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "draft.txt");
+    const changeSetId = randomUUID();
+    await writeFile(target, "original\n");
+    const original = await snapshots.capture(target);
+    await writeFile(target, "middle\n");
+    const middle = await snapshots.capture(target);
+    ledger.add(change("write_file", [{ path: target, before: original, after: middle }], changeSetId));
+    await writeFile(target, "final\n");
+    const final = await snapshots.capture(target);
+    ledger.add(change("write_file", [{ path: target, before: middle, after: final }], changeSetId));
+
+    const result = await rewind.undoChangeSet(changeSetId);
+
+    expect(result.status).toBe("undone");
+    expect(result.actionCount).toBe(2);
+    expect(await readFile(target, "utf8")).toBe("original\n");
+  });
+
+  it("does not partially undo a change set when preflight finds a conflict", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const first = path.join(directory, "first.txt");
+    const second = path.join(directory, "second.txt");
+    const changeSetId = randomUUID();
+    await writeFile(first, "first before\n");
+    await writeFile(second, "second before\n");
+    const firstBefore = await snapshots.capture(first);
+    const secondBefore = await snapshots.capture(second);
+    await writeFile(first, "first after\n");
+    await writeFile(second, "second after\n");
+    const firstAfter = await snapshots.capture(first);
+    const secondAfter = await snapshots.capture(second);
+    ledger.add(
+      change("write_file", [{ path: first, before: firstBefore, after: firstAfter }], changeSetId),
+    );
+    ledger.add(
+      change("write_file", [{ path: second, before: secondBefore, after: secondAfter }], changeSetId),
+    );
+    await writeFile(second, "user edit\n");
+
+    await expect(rewind.undoChangeSet(changeSetId)).rejects.toThrow("Refusing to overwrite");
+    expect(await readFile(first, "utf8")).toBe("first after\n");
+    expect(await readFile(second, "utf8")).toBe("user edit\n");
+    expect(ledger.listByChangeSet(changeSetId).every((record) => record.status === "applied")).toBe(
+      true,
+    );
+  });
 });
 
 describe("SnapshotStore limits", () => {
@@ -120,9 +170,36 @@ describe("SnapshotStore limits", () => {
   });
 });
 
-function change(tool: string, paths: ChangeRecord["paths"]): ChangeRecord {
+describe("Ledger compatibility", () => {
+  it("treats v0.2 records without a change-set id as single-action sets", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-ledger-"));
+    temporaryDirectories.push(directory);
+    const filename = path.join(directory, "ledger.sqlite");
+    const ledger = new Ledger(filename);
+    const legacy = change("write_file", []);
+    const { changeSetId: _changeSetId, ...payload } = legacy;
+    const database = new DatabaseSync(filename);
+    database
+      .prepare("INSERT INTO changes (id, created_at, status, payload) VALUES (?, ?, ?, ?)")
+      .run(legacy.id, legacy.createdAt, legacy.status, JSON.stringify(payload));
+    database.close();
+
+    const sets = ledger.listChangeSets();
+
+    expect(sets).toHaveLength(1);
+    expect(sets[0].id).toBe(legacy.id);
+    expect(sets[0].actionCount).toBe(1);
+  });
+});
+
+function change(
+  tool: string,
+  paths: ChangeRecord["paths"],
+  changeSetId = randomUUID(),
+): ChangeRecord {
   return {
     id: randomUUID(),
+    changeSetId,
     tool,
     summary: "test change",
     createdAt: new Date().toISOString(),

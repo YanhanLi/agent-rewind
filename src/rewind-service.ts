@@ -1,4 +1,4 @@
-import type { ChangeRecord } from "./model.js";
+import type { ChangeRecord, ChangeSetView, PathChange } from "./model.js";
 import { Ledger } from "./ledger.js";
 import { RewindConflictError, SnapshotStore } from "./snapshot-store.js";
 
@@ -10,6 +10,41 @@ export class RewindService {
 
   list(): ChangeRecord[] {
     return this.ledger.list();
+  }
+
+  listChangeSets(): ChangeSetView[] {
+    return this.ledger.listChangeSets();
+  }
+
+  async undoChangeSet(id: string): Promise<ChangeSetView> {
+    const records = this.ledger.listByChangeSet(id);
+    if (records.length === 0) throw new Error(`Unknown change set: ${id}`);
+    if (records.some((record) => record.status !== "applied")) {
+      throw new Error("A change set can only be undone while all of its actions are applied");
+    }
+
+    // Preflight only the final expected state for each path. Earlier actions on
+    // the same path become valid as later actions are reversed.
+    const finalByPath = new Map<string, PathChange>();
+    const initialByPath = new Map<string, PathChange>();
+    for (const record of records) {
+      for (const change of record.paths) {
+        if (!initialByPath.has(change.path)) initialByPath.set(change.path, change);
+        finalByPath.set(change.path, change);
+      }
+    }
+    await Promise.all([...finalByPath.values()].map((change) => this.snapshots.assertCurrent(change)));
+
+    for (const record of [...records].reverse()) {
+      await this.undo(record.id);
+    }
+    for (const change of initialByPath.values()) {
+      const restored = await this.snapshots.capture(change.path);
+      if (restored.kind !== change.before.kind || restored.hash !== change.before.hash) {
+        throw new Error(`Change-set undo verification failed for ${change.path}`);
+      }
+    }
+    return this.ledger.getChangeSet(id)!;
   }
 
   async undo(id: string): Promise<ChangeRecord> {

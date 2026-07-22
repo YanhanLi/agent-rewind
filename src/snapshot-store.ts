@@ -97,10 +97,7 @@ export class SnapshotStore {
   }
 
   async restore(change: PathChange): Promise<void> {
-    const current = await this.capture(change.path);
-    if (current.hash !== change.after.hash || current.kind !== change.after.kind) {
-      throw new RewindConflictError(change.path, change.after.hash, current.hash);
-    }
+    await this.assertCurrent(change);
 
     if (change.before.kind === "missing") {
       await rm(change.path, { recursive: true, force: true });
@@ -117,6 +114,13 @@ export class SnapshotStore {
     // restoration only removes a newly created empty directory safely.
     if (change.after.kind === "missing") {
       throw new Error(`Directory restoration requires a move inverse: ${change.path}`);
+    }
+  }
+
+  async assertCurrent(change: PathChange): Promise<void> {
+    const current = await this.capture(change.path);
+    if (current.hash !== change.after.hash || current.kind !== change.after.kind) {
+      throw new RewindConflictError(change.path, change.after.hash, current.hash);
     }
   }
 

@@ -36,7 +36,13 @@ async function main(): Promise<void> {
     millisecondsFromEnvironment("AGENT_REWIND_APPROVAL_TIMEOUT_MS", 120_000),
   );
   await approval.start();
-  await startProxy({ roots: parsed.roots, approval, snapshots, ledger });
+  await startProxy({
+    roots: parsed.roots,
+    approval,
+    snapshots,
+    ledger,
+    changeSetWindowMs: millisecondsFromEnvironment("AGENT_REWIND_CHANGE_SET_WINDOW_MS", 30_000),
+  });
 }
 
 function parseArguments(args: string[]): { roots: string[]; port: number } {

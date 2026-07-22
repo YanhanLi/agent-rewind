@@ -24,10 +24,12 @@ interface ProxyOptions {
   approval: ApprovalServer;
   snapshots: SnapshotStore;
   ledger: Ledger;
+  changeSetWindowMs: number;
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.2.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.3.0" });
+  const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const require = createRequire(import.meta.url);
   const filesystemPackage = require.resolve("@modelcontextprotocol/server-filesystem/package.json");
   const filesystemEntry = path.join(path.dirname(filesystemPackage), "dist", "index.js");
@@ -39,7 +41,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.2.0" },
+    { name: "agent-rewind", version: "0.3.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -101,6 +103,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
       if (paths.some((item) => item.before.hash !== item.after.hash)) {
         const record: ChangeRecord = {
           id: randomUUID(),
+          changeSetId: changeSets.next(),
           tool: name,
           summary,
           createdAt: new Date().toISOString(),
@@ -116,6 +119,21 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   });
 
   await server.connect(new StdioServerTransport());
+}
+
+class ChangeSetTracker {
+  private current?: { id: string; lastActivity: number };
+
+  constructor(private readonly windowMs: number) {}
+
+  next(now = Date.now()): string {
+    if (!this.current || now - this.current.lastActivity > this.windowMs) {
+      this.current = { id: randomUUID(), lastActivity: now };
+    } else {
+      this.current.lastActivity = now;
+    }
+    return this.current.id;
+  }
 }
 
 async function targetPaths(

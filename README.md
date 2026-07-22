@@ -1,33 +1,38 @@
 # Agent Rewind
 
-Agent Rewind is a local MCP wrapper that previews filesystem changes and makes
-approved changes safely undoable. It currently targets Claude Desktop on macOS
-and wraps the official MCP Filesystem Server.
+[中文](#中文说明) | [English](#english)
 
-Version 0.2 is a user-testing build. It supports `write_file`, `edit_file`,
-`create_directory`, and `move_file`. Read-only tools pass through unchanged.
+## 中文说明
 
-## Run locally
+Agent Rewind 是一个本地 MCP 文件操作代理。它会在 Agent 写入、编辑、移动文件或创建目录之前展示变更，让用户明确批准，并为已经执行的操作保存可验证的撤销记录。
+
+它目前面向 macOS 上的 Claude Desktop，包装官方 Filesystem MCP Server。所有审批、快照和操作记录均保存在本机，不需要账号或云服务。
+
+### 它解决什么问题
+
+Claude Desktop 原生确认框主要展示工具名和参数。Agent Rewind 在此基础上提供：
+
+- 执行前查看文件 diff、影响路径和快照大小；
+- 拒绝单次操作，或仅在当前会话放行同一目录内的同类工具；
+- 撤销单次操作或一组连续操作；
+- 撤销前检查文件是否又被用户、IDE 或其他 Agent 修改；
+- 撤销后重新计算哈希，确认文件确实回到原始状态。
+
+检测到冲突时，Agent Rewind 会拒绝自动覆盖用户的新内容。
+
+### 本地运行
+
+需要 Node.js 22.5 或更高版本：
 
 ```bash
+git clone https://github.com/YanhanLi/agent-rewind.git
+cd agent-rewind
 npm install
 npm run build
-node /absolute/path/to/agent-rewind/dist/cli.js /absolute/allowed/directory
+node dist/cli.js doctor /绝对路径/允许访问的目录
 ```
 
-The local approval page runs at `http://127.0.0.1:3219` and opens when the first
-filesystem action needs approval. Snapshots and the change ledger are stored in
-`~/.agent-rewind/`.
-
-Run the diagnostic before configuring a client:
-
-```bash
-node /absolute/path/to/agent-rewind/dist/cli.js doctor /absolute/allowed/directory
-```
-
-## Claude Desktop
-
-Build the project, then add this server to Claude Desktop's configuration:
+诊断全部通过后，在 Claude Desktop 配置中加入：
 
 ```json
 {
@@ -35,43 +40,62 @@ Build the project, then add this server to Claude Desktop's configuration:
     "filesystem-with-rewind": {
       "command": "node",
       "args": [
-        "/absolute/path/to/agent-rewind/dist/cli.js",
-        "/absolute/allowed/directory"
+        "/绝对路径/agent-rewind/dist/cli.js",
+        "/绝对路径/允许访问的目录"
       ]
     }
   }
 }
 ```
 
-Restart Claude Desktop after changing its configuration. Do not configure the
-unwrapped Filesystem MCP Server for the same directory, because calls through
-that server would bypass Agent Rewind.
+重启 Claude Desktop。不要同时为同一目录配置未包装的 Filesystem MCP Server，否则 Agent 可以绕过 Agent Rewind。
 
-## Safety behavior
+第一次出现待审批操作时，浏览器会自动打开本地审批页。默认从 `http://127.0.0.1:3219` 开始监听；若端口被占用，会自动尝试后续端口。快照和操作记录保存在 `~/.agent-rewind/`。
 
-- A mutating call waits for explicit approval in the local page.
-- Every local API request requires a random capability token and same-origin validation.
-- Approval expires after two minutes; occupied ports fall forward from 3219 automatically.
-- "Allow in folder" applies only to the same tool and directory tree for the current process.
-- The target is checked again after approval to prevent a time-of-check/time-of-use race.
-- Undo proceeds only when the current path still matches the recorded post-change hash.
-- Undo is verified against the original pre-change hash.
-- Conflicting external edits are never overwritten automatically.
-- Individual snapshots default to 16 MiB, the store defaults to 1 GiB, and records expire after 7 days.
+相隔不超过 30 秒的连续变更会聚合成一个 change-set。整组撤销开始前会检查所有路径的最终状态；只要发现一个冲突，就不会修改任何文件。当前聚合依据是活动时间窗口，不等同于模型对话或 Claude 任务边界。
 
-These defaults can be adjusted for testing:
+### 安全边界
+
+- 只有经过这个 MCP Server 的操作才可见，Claude、Codex 或其他客户端的内置文件工具不在覆盖范围内。
+- 本地 API 使用随机能力令牌和 Origin 校验，审批默认在两分钟后失效。
+- 符号链接和特殊文件会被快照层拒绝。
+- 单文件快照默认上限为 16 MiB，总存储上限为 1 GiB，记录默认保留 7 天。
+- 当前是单机、单用户工具，不应作为网络服务暴露。
+
+可通过环境变量调整测试参数：
 
 ```bash
 AGENT_REWIND_MAX_FILE_MB=32 \
 AGENT_REWIND_MAX_TOTAL_MB=2048 \
 AGENT_REWIND_RETENTION_DAYS=14 \
 AGENT_REWIND_APPROVAL_TIMEOUT_MS=180000 \
-node dist/cli.js /absolute/allowed/directory
+AGENT_REWIND_CHANGE_SET_WINDOW_MS=45000 \
+node dist/cli.js /绝对路径/允许访问的目录
 ```
 
-## Current boundaries
+### 当前范围
 
-- Only operations routed through this MCP server are visible.
-- The approval page is process-local and listens only on `127.0.0.1`; it is not a multi-user service.
-- Symlinks and special filesystem entries are rejected by the snapshot layer.
-- OpenCode and Codex adapters are planned after the MCP feasibility gate.
+已支持 `write_file`、`edit_file`、`create_directory` 和 `move_file`。只读工具会原样转发。OpenCode 和 Codex 适配将在 Claude Desktop 用户验证完成后再推进。
+
+## English
+
+Agent Rewind is a local MCP filesystem wrapper that previews mutations, requires explicit approval, and records verifiable undo information. It currently targets Claude Desktop on macOS and wraps the official Filesystem MCP Server.
+
+Key properties:
+
+- local diff and impact preview before execution;
+- single-action and session-scoped folder approval;
+- conflict-aware undo with post-restore hash verification;
+- local SQLite ledger and content-addressed snapshots;
+- no account or cloud service.
+
+Run `node dist/cli.js doctor /absolute/allowed/directory` before configuring Claude Desktop. See the Chinese section above for the full configuration and safety boundaries.
+
+## Development
+
+```bash
+npm install
+npm run check
+```
+
+The project is licensed under the [MIT License](LICENSE).

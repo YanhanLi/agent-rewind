@@ -11,11 +11,22 @@ export interface PathChange {
 
 export interface ChangeRecord {
   id: string;
+  changeSetId: string;
   tool: string;
   summary: string;
   createdAt: string;
   status: "applied" | "undone" | "conflict";
   paths: PathChange[];
+}
+
+export interface ChangeSetView {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  status: "applied" | "undone" | "conflict" | "partial";
+  actionCount: number;
+  affectedPaths: string[];
+  changes: ChangeRecord[];
 }
 
 export interface PendingApproval {
