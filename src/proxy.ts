@@ -30,7 +30,7 @@ interface ProxyOptions {
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.5.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.6.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const require = createRequire(import.meta.url);
   const filesystemPackage = require.resolve("@modelcontextprotocol/server-filesystem/package.json");
@@ -43,7 +43,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.5.0" },
+    { name: "agent-rewind", version: "0.6.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -154,6 +154,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
           paths,
         };
         options.ledger.add(record);
+        options.ledger.recordEvent({ type: "change_applied", tool: name });
       }
       return result;
     } catch (error) {

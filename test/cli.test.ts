@@ -15,7 +15,26 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.5.0");
+    expect(output.trim()).toBe("agent-rewind 0.6.0");
+  });
+
+  it("prints an empty local validation report as JSON", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-report-"));
+    temporaryDirectories.push(directory);
+    const output = execFileSync(
+      process.execPath,
+      [path.resolve("dist/cli.js"), "report", "--json"],
+      { encoding: "utf8", env: { ...process.env, AGENT_REWIND_DATA_DIR: directory } },
+    );
+    const report = JSON.parse(output) as {
+      period: { firstEventAt: string | null };
+      approvals: { requested: number };
+      changes: { actions: number };
+    };
+
+    expect(report.period.firstEventAt).toBeNull();
+    expect(report.approvals.requested).toBe(0);
+    expect(report.changes.actions).toBe(0);
   });
 
   it("generates a Claude Desktop configuration", () => {

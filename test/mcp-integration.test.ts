@@ -4,6 +4,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, expect, it } from "vitest";
+import { Ledger } from "../src/ledger.js";
 
 const directories: string[] = [];
 
@@ -97,6 +98,15 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
       code: "ENOENT",
     });
     expect(await readFile(outsideSet, "utf8")).toBe("keep this\n");
+
+    const report = new Ledger(path.join(data, "ledger.sqlite")).validationReport();
+    expect(report.approvals).toMatchObject({
+      requested: 3,
+      sessionApproved: 1,
+      autoApproved: 2,
+    });
+    expect(report.changes).toMatchObject({ actions: 3, changeSets: 2, undone: 2 });
+    expect(report.undo).toEqual({ attempted: 1, succeeded: 1, conflicts: 0 });
   } finally {
     await transport.close();
   }

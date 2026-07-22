@@ -47,7 +47,11 @@ export class ApprovalServer {
   }
 
   request(input: Omit<PendingApproval, "id" | "expiresAt">): Promise<boolean> {
-    if (this.sessionRules.some((rule) => matchesRule(rule, input))) return Promise.resolve(true);
+    this.rewind.recordEvent({ type: "approval_requested", tool: input.tool });
+    if (this.sessionRules.some((rule) => matchesRule(rule, input))) {
+      this.rewind.recordEvent({ type: "approval_auto_approved", tool: input.tool });
+      return Promise.resolve(true);
+    }
     const id = randomUUID();
     const request = {
       ...input,
@@ -66,6 +70,7 @@ export class ApprovalServer {
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.rewind.recordEvent({ type: "approval_expired", tool: request.tool });
         resolve(false);
       }, this.timeoutMs);
       this.pending.set(id, { request, resolve, timer });
@@ -137,6 +142,15 @@ export class ApprovalServer {
         clearTimeout(waiter.timer);
         if (approval[2] === "approve-session") {
           this.sessionRules.push({ tool: waiter.request.tool, scope: waiter.request.scope });
+          this.rewind.recordEvent({
+            type: "approval_session_approved",
+            tool: waiter.request.tool,
+          });
+        } else {
+          this.rewind.recordEvent({
+            type: approval[2] === "reject" ? "approval_rejected" : "approval_approved",
+            tool: waiter.request.tool,
+          });
         }
         waiter.resolve(approval[2] !== "reject");
         response.end(JSON.stringify({ ok: true }));

@@ -17,7 +17,11 @@ describe("ApprovalServer", () => {
     if (!address || typeof address === "string") throw new Error("Expected a TCP address");
     cleanup.push(() => new Promise<void>((resolve) => occupied.close(() => resolve())));
 
-    const rewind = { list: () => [], undo: async () => undefined } as unknown as RewindService;
+    const rewind = {
+      list: () => [],
+      recordEvent: () => undefined,
+      undo: async () => undefined,
+    } as unknown as RewindService;
     const approval = new ApprovalServer(rewind, address.port);
     await approval.start();
     cleanup.push(() => approval.stop());
@@ -35,6 +39,7 @@ describe("ApprovalServer", () => {
       listChangeSets: () => [],
       undo: async () => undefined,
       undoChangeSet: async () => undefined,
+      recordEvent: () => undefined,
     } as unknown as RewindService;
     const approval = new ApprovalServer(
       rewind,
@@ -65,6 +70,27 @@ describe("ApprovalServer", () => {
     now.mockReturnValue(15_001);
     void approval.request(pendingInput("third"));
     expect(opened).toHaveLength(2);
+  });
+
+  it("records approval expiry without retaining request details", async () => {
+    const events: unknown[] = [];
+    const rewind = {
+      list: () => [],
+      listChangeSets: () => [],
+      recordEvent: (event: unknown) => events.push(event),
+    } as unknown as RewindService;
+    const approval = new ApprovalServer(rewind, 32_220, 10, () => undefined, "linux");
+    await approval.start();
+    cleanup.push(() => approval.stop());
+
+    await expect(approval.request(pendingInput("private summary"))).resolves.toBe(false);
+
+    expect(events).toEqual([
+      { type: "approval_requested", tool: "write_file" },
+      { type: "approval_expired", tool: "write_file" },
+    ]);
+    expect(JSON.stringify(events)).not.toContain("private summary");
+    expect(JSON.stringify(events)).not.toContain("/tmp/test.txt");
   });
 });
 

@@ -1,5 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { ChangeRecord, ChangeSetView } from "./model.js";
+import type {
+  ChangeRecord,
+  ChangeSetView,
+  LocalEvent,
+  LocalEventType,
+  ValidationReport,
+} from "./model.js";
 
 export class Ledger {
   private readonly database: DatabaseSync;
@@ -12,7 +19,15 @@ export class Ledger {
         created_at TEXT NOT NULL,
         status TEXT NOT NULL,
         payload TEXT NOT NULL
-      )
+      );
+      CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        type TEXT NOT NULL,
+        tool TEXT,
+        target TEXT
+      );
+      CREATE INDEX IF NOT EXISTS events_created_at ON events (created_at)
     `);
   }
 
@@ -26,6 +41,62 @@ export class Ledger {
     this.database
       .prepare("UPDATE changes SET status = ?, payload = ? WHERE id = ?")
       .run(record.status, JSON.stringify(record), record.id);
+  }
+
+  recordEvent(event: LocalEvent): void {
+    this.database
+      .prepare("INSERT INTO events (id, created_at, type, tool, target) VALUES (?, ?, ?, ?, ?)")
+      .run(
+        randomUUID(),
+        new Date().toISOString(),
+        event.type,
+        event.tool ?? null,
+        event.target ?? null,
+      );
+  }
+
+  validationReport(): ValidationReport {
+    const events = this.database
+      .prepare("SELECT created_at, type, tool FROM events ORDER BY created_at ASC")
+      .all() as Array<{ created_at: string; type: LocalEventType; tool: string | null }>;
+    const records = this.allRecords();
+    const count = (type: LocalEventType) => events.filter((event) => event.type === type).length;
+    const tools: Record<string, number> = {};
+    for (const event of events) {
+      if (event.type === "change_applied" && event.tool) {
+        tools[event.tool] = (tools[event.tool] ?? 0) + 1;
+      }
+    }
+    return {
+      generatedAt: new Date().toISOString(),
+      period: {
+        firstEventAt: events.at(0)?.created_at ?? null,
+        lastEventAt: events.at(-1)?.created_at ?? null,
+      },
+      approvals: {
+        requested: count("approval_requested"),
+        approved: count("approval_approved"),
+        sessionApproved: count("approval_session_approved"),
+        autoApproved: count("approval_auto_approved"),
+        rejected: count("approval_rejected"),
+        expired: count("approval_expired"),
+      },
+      changes: {
+        changeSets: new Set(records.map((record) => record.changeSetId)).size,
+        actions: records.length,
+        applied: records.filter((record) => record.status === "applied").length,
+        undone: records.filter((record) => record.status === "undone").length,
+        conflicts: records.filter((record) => record.status === "conflict").length,
+      },
+      undo: {
+        attempted: count("undo_started"),
+        succeeded: count("undo_succeeded"),
+        conflicts: count("undo_conflict"),
+      },
+      tools: Object.fromEntries(
+        Object.entries(tools).sort(([left], [right]) => left.localeCompare(right)),
+      ),
+    };
   }
 
   get(id: string): ChangeRecord | undefined {
@@ -43,10 +114,7 @@ export class Ledger {
   }
 
   listByChangeSet(changeSetId: string): ChangeRecord[] {
-    const rows = this.database.prepare("SELECT payload FROM changes ORDER BY created_at ASC").all() as Array<{
-      payload: string;
-    }>;
-    return rows.map((row) => parseRecord(row.payload)).filter((record) => record.changeSetId === changeSetId);
+    return this.allRecords().filter((record) => record.changeSetId === changeSetId);
   }
 
   getChangeSet(changeSetId: string): ChangeSetView | undefined {
@@ -68,10 +136,12 @@ export class Ledger {
   }
 
   pruneBefore(cutoff: Date): number {
-    const result = this.database
+    const cutoffValue = cutoff.toISOString();
+    const changes = this.database
       .prepare("DELETE FROM changes WHERE created_at < ?")
-      .run(cutoff.toISOString());
-    return Number(result.changes);
+      .run(cutoffValue);
+    this.database.prepare("DELETE FROM events WHERE created_at < ?").run(cutoffValue);
+    return Number(changes.changes);
   }
 
   referencedBlobs(): Set<string> {
@@ -87,6 +157,13 @@ export class Ledger {
       }
     }
     return blobs;
+  }
+
+  private allRecords(): ChangeRecord[] {
+    const rows = this.database
+      .prepare("SELECT payload FROM changes ORDER BY created_at ASC")
+      .all() as Array<{ payload: string }>;
+    return rows.map((row) => parseRecord(row.payload));
   }
 }
 

@@ -55,6 +55,7 @@ describe("RewindService", () => {
     await expect(rewind.undo(record.id)).rejects.toThrow("Refusing to overwrite");
     expect(await readFile(target, "utf8")).toBe("user version\n");
     expect(ledger.get(record.id)?.status).toBe("conflict");
+    expect(ledger.validationReport().undo).toEqual({ attempted: 1, succeeded: 0, conflicts: 1 });
   });
 
   it("moves a directory back when its state is unchanged", async () => {
@@ -97,6 +98,7 @@ describe("RewindService", () => {
     expect(result.status).toBe("undone");
     expect(result.actionCount).toBe(2);
     expect(await readFile(target, "utf8")).toBe("original\n");
+    expect(ledger.validationReport().undo).toEqual({ attempted: 1, succeeded: 1, conflicts: 0 });
   });
 
   it("does not partially undo a change set when preflight finds a conflict", async () => {
@@ -189,6 +191,34 @@ describe("Ledger compatibility", () => {
     expect(sets).toHaveLength(1);
     expect(sets[0].id).toBe(legacy.id);
     expect(sets[0].actionCount).toBe(1);
+  });
+
+  it("aggregates validation events without path or content columns", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-events-"));
+    temporaryDirectories.push(directory);
+    const filename = path.join(directory, "ledger.sqlite");
+    const ledger = new Ledger(filename);
+    ledger.recordEvent({ type: "approval_requested", tool: "write_file" });
+    ledger.recordEvent({ type: "approval_approved", tool: "write_file" });
+    ledger.recordEvent({ type: "change_applied", tool: "write_file" });
+    ledger.recordEvent({ type: "undo_started", target: "change_set" });
+    ledger.recordEvent({ type: "undo_succeeded", target: "change_set" });
+
+    const report = ledger.validationReport();
+    const database = new DatabaseSync(filename);
+    const columns = database.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>;
+    database.close();
+
+    expect(report.approvals).toMatchObject({ requested: 1, approved: 1 });
+    expect(report.undo).toEqual({ attempted: 1, succeeded: 1, conflicts: 0 });
+    expect(report.tools).toEqual({ write_file: 1 });
+    expect(columns.map((column) => column.name)).toEqual([
+      "id",
+      "created_at",
+      "type",
+      "tool",
+      "target",
+    ]);
   });
 });
 

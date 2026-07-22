@@ -13,13 +13,18 @@ import {
   uninstallClaudeConfig,
 } from "./claude-config.js";
 import { Ledger } from "./ledger.js";
+import type { ValidationReport } from "./model.js";
 import { startProxy } from "./proxy.js";
 import { RewindService } from "./rewind-service.js";
 import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.5.0\n");
+    process.stdout.write("agent-rewind 0.6.0\n");
+    return;
+  }
+  if (process.argv[2] === "report") {
+    await report(process.argv.slice(3));
     return;
   }
   if (process.argv[2] === "doctor") {
@@ -39,9 +44,7 @@ async function main(): Promise<void> {
     return;
   }
   const parsed = parseArguments(process.argv.slice(2));
-  const dataDirectory = process.env.AGENT_REWIND_DATA_DIR
-    ? path.resolve(process.env.AGENT_REWIND_DATA_DIR)
-    : path.join(os.homedir(), ".agent-rewind");
+  const dataDirectory = getDataDirectory();
   await mkdir(dataDirectory, { recursive: true });
   const snapshots = new SnapshotStore(path.join(dataDirectory, "blobs"), {
     maxFileBytes: megabytesFromEnvironment("AGENT_REWIND_MAX_FILE_MB", 16),
@@ -79,7 +82,7 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
       }
     } else if (args[index] === "--help" || args[index] === "-h") {
       process.stderr.write(
-        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind config claude <allowed-directory> [...]\n       agent-rewind install claude [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall claude [--dry-run]\n       agent-rewind --version\n",
+        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config claude <allowed-directory> [...]\n       agent-rewind install claude [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall claude [--dry-run]\n       agent-rewind --version\n",
       );
       process.exit(0);
     } else {
@@ -162,6 +165,43 @@ function millisecondsFromEnvironment(name: string, fallback: number): number {
   return value;
 }
 
+function getDataDirectory(): string {
+  return process.env.AGENT_REWIND_DATA_DIR
+    ? path.resolve(process.env.AGENT_REWIND_DATA_DIR)
+    : path.join(os.homedir(), ".agent-rewind");
+}
+
+async function report(args: string[]): Promise<void> {
+  if (args.some((value) => value !== "--json")) {
+    throw new Error("report accepts only --json");
+  }
+  const dataDirectory = getDataDirectory();
+  await mkdir(dataDirectory, { recursive: true });
+  const result = new Ledger(path.join(dataDirectory, "ledger.sqlite")).validationReport();
+  process.stdout.write(
+    args.includes("--json") ? `${JSON.stringify(result, null, 2)}\n` : formatReport(result),
+  );
+}
+
+function formatReport(report: ValidationReport): string {
+  const period = report.period.firstEventAt
+    ? `${report.period.firstEventAt} to ${report.period.lastEventAt}`
+    : "no events recorded";
+  const tools = Object.entries(report.tools)
+    .map(([tool, count]) => `${tool}=${count}`)
+    .join(", ");
+  return [
+    "Agent Rewind local validation report",
+    `Period: ${period}`,
+    `Approvals: ${report.approvals.requested} requested, ${report.approvals.approved} approved, ${report.approvals.sessionApproved} folder-approved, ${report.approvals.autoApproved} auto-approved, ${report.approvals.rejected} rejected, ${report.approvals.expired} expired`,
+    `Changes: ${report.changes.actions} actions in ${report.changes.changeSets} sets; ${report.changes.applied} applied, ${report.changes.undone} undone, ${report.changes.conflicts} conflicts`,
+    `Undo: ${report.undo.attempted} attempted, ${report.undo.succeeded} succeeded, ${report.undo.conflicts} conflicts`,
+    `Tools: ${tools || "none"}`,
+    "Privacy: local aggregate only; event rows contain no paths, file contents, prompts, or arguments.",
+    "",
+  ].join("\n");
+}
+
 async function doctor(args: string[]): Promise<void> {
   if (args.length === 0) throw new Error("doctor requires at least one allowed directory");
   const checks: Array<{ name: string; ok: boolean; warning?: boolean; detail: string }> = [];
@@ -190,9 +230,7 @@ async function doctor(args: string[]): Promise<void> {
     }
   }
 
-  const dataDirectory = process.env.AGENT_REWIND_DATA_DIR
-    ? path.resolve(process.env.AGENT_REWIND_DATA_DIR)
-    : path.join(os.homedir(), ".agent-rewind");
+  const dataDirectory = getDataDirectory();
   try {
     await mkdir(dataDirectory, { recursive: true });
     await access(dataDirectory, constants.R_OK | constants.W_OK);

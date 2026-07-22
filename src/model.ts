@@ -41,3 +41,43 @@ export interface PendingApproval {
   scope: string;
   expiresAt: string;
 }
+
+export type LocalEventType =
+  | "approval_requested"
+  | "approval_approved"
+  | "approval_session_approved"
+  | "approval_auto_approved"
+  | "approval_rejected"
+  | "approval_expired"
+  | "change_applied"
+  | "undo_started"
+  | "undo_succeeded"
+  | "undo_conflict";
+
+export interface LocalEvent {
+  type: LocalEventType;
+  tool?: string;
+  target?: "change" | "change_set";
+}
+
+export interface ValidationReport {
+  generatedAt: string;
+  period: { firstEventAt: string | null; lastEventAt: string | null };
+  approvals: {
+    requested: number;
+    approved: number;
+    sessionApproved: number;
+    autoApproved: number;
+    rejected: number;
+    expired: number;
+  };
+  changes: {
+    changeSets: number;
+    actions: number;
+    applied: number;
+    undone: number;
+    conflicts: number;
+  };
+  undo: { attempted: number; succeeded: number; conflicts: number };
+  tools: Record<string, number>;
+}
