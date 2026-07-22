@@ -58,6 +58,39 @@ describe("RewindService", () => {
     expect(ledger.validationReport().undo).toEqual({ attempted: 1, succeeded: 0, conflicts: 1 });
   });
 
+  it("restores a deleted file and rejects undo after the path is recreated", async () => {
+    const first = await fixture();
+    const restoredTarget = path.join(first.directory, "deleted.txt");
+    await writeFile(restoredTarget, "restore me\n");
+    const restoredBefore = await first.snapshots.capture(restoredTarget);
+    await rm(restoredTarget);
+    const restoredAfter = await first.snapshots.capture(restoredTarget);
+    const restoredRecord = change("rewind_delete_file", [
+      { path: restoredTarget, before: restoredBefore, after: restoredAfter },
+    ]);
+    first.ledger.add(restoredRecord);
+
+    await first.rewind.undo(restoredRecord.id);
+    expect(await readFile(restoredTarget, "utf8")).toBe("restore me\n");
+
+    const second = await fixture();
+    const conflictedTarget = path.join(second.directory, "deleted.txt");
+    await writeFile(conflictedTarget, "agent deleted this\n");
+    const conflictedBefore = await second.snapshots.capture(conflictedTarget);
+    await rm(conflictedTarget);
+    const conflictedAfter = await second.snapshots.capture(conflictedTarget);
+    const conflictedRecord = change("rewind_delete_file", [
+      { path: conflictedTarget, before: conflictedBefore, after: conflictedAfter },
+    ]);
+    second.ledger.add(conflictedRecord);
+    await writeFile(conflictedTarget, "user recreated this\n");
+
+    await expect(second.rewind.undo(conflictedRecord.id)).rejects.toThrow(
+      "Refusing to overwrite",
+    );
+    expect(await readFile(conflictedTarget, "utf8")).toBe("user recreated this\n");
+  });
+
   it("moves a directory back when its state is unchanged", async () => {
     const { directory, snapshots, ledger, rewind } = await fixture();
     const source = path.join(directory, "source");

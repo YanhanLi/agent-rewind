@@ -38,6 +38,9 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     expect(tools.tools.some((tool) => tool.name === "write_file")).toBe(true);
     expect(tools.tools.some((tool) => tool.name === "rewind_begin_change_set")).toBe(true);
     expect(tools.tools.some((tool) => tool.name === "rewind_end_change_set")).toBe(true);
+    expect(tools.tools.find((tool) => tool.name === "rewind_delete_file")).toMatchObject({
+      annotations: { destructiveHint: true },
+    });
     expect((await fetch(`http://127.0.0.1:${port}/api/state`)).status).toBe(403);
     expect(
       (
@@ -99,18 +102,48 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     });
     expect(await readFile(outsideSet, "utf8")).toBe("keep this\n");
 
+    const deleteDirectory = await client.callTool({
+      name: "rewind_delete_file",
+      arguments: { path: root },
+    });
+    expect(deleteDirectory.isError).toBe(true);
+
+    await client.callTool({
+      name: "rewind_begin_change_set",
+      arguments: { label: "Deletion task" },
+    });
+    const deleteCall = client.callTool({
+      name: "rewind_delete_file",
+      arguments: { path: target },
+    });
+    const deleteApproval = await waitForPending(port, token);
+    await post(port, token, `/api/approvals/${deleteApproval.pending[0].id}/approve`);
+    const deleted = await deleteCall;
+    expect(deleted.isError).not.toBe(true);
+    await expect(readFile(target, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await client.callTool({ name: "rewind_end_change_set", arguments: {} });
+
+    const afterDelete = await stateFor(port, token);
+    const deletionSet = afterDelete.changeSets.find(
+      (changeSet) => changeSet.label === "Deletion task",
+    );
+    expect(deletionSet?.actionCount).toBe(1);
+    await post(port, token, `/api/change-sets/${deletionSet!.id}/undo`);
+    expect(await readFile(target, "utf8")).toBe("original\n");
+
     const report = new Ledger(path.join(data, "ledger.sqlite")).validationReport();
     expect(report.approvals).toMatchObject({
-      requested: 3,
+      requested: 4,
       sessionApproved: 1,
       autoApproved: 2,
+      approved: 1,
     });
-    expect(report.changes).toMatchObject({ actions: 3, changeSets: 2, undone: 2 });
-    expect(report.undo).toEqual({ attempted: 1, succeeded: 1, conflicts: 0 });
+    expect(report.changes).toMatchObject({ actions: 4, changeSets: 3, undone: 3 });
+    expect(report.undo).toEqual({ attempted: 2, succeeded: 2, conflicts: 0 });
   } finally {
     await transport.close();
   }
-}, 15_000);
+}, 20_000);
 
 interface UiState {
   pending: Array<{ id: string }>;

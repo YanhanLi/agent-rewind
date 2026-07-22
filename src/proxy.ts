@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -17,7 +17,14 @@ import type { ChangeRecord, EntryState, PathChange } from "./model.js";
 import type { Ledger } from "./ledger.js";
 import type { SnapshotStore } from "./snapshot-store.js";
 
-const MUTATING_TOOLS = new Set(["write_file", "edit_file", "create_directory", "move_file"]);
+const DELETE_FILE = "rewind_delete_file";
+const MUTATING_TOOLS = new Set([
+  "write_file",
+  "edit_file",
+  "create_directory",
+  "move_file",
+  DELETE_FILE,
+]);
 const BEGIN_CHANGE_SET = "rewind_begin_change_set";
 const END_CHANGE_SET = "rewind_end_change_set";
 
@@ -30,7 +37,7 @@ interface ProxyOptions {
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.8.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.9.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const require = createRequire(import.meta.url);
   const filesystemPackage = require.resolve("@modelcontextprotocol/server-filesystem/package.json");
@@ -43,7 +50,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.8.0" },
+    { name: "agent-rewind", version: "0.9.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -60,6 +67,20 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
               }
             : tool,
         ),
+        {
+          name: DELETE_FILE,
+          description:
+            "Delete one file through Agent Rewind. The file is snapshotted, previewed, and requires local approval so it can be restored later. Directories are rejected.",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              path: { type: "string", minLength: 1, description: "Absolute path to the file." },
+            },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        },
         {
           name: BEGIN_CHANGE_SET,
           description:
@@ -111,6 +132,13 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     try {
       const targets = await targetPaths(name, arguments_, options.roots);
       const before = await Promise.all(targets.map((target) => options.snapshots.capture(target)));
+      if (name === DELETE_FILE && before[0].kind !== "file") {
+        throw new Error(
+          before[0].kind === "directory"
+            ? "rewind_delete_file only deletes files; directory deletion is not supported"
+            : `Cannot delete a missing file: ${targets[0]}`,
+        );
+      }
       const detail = await preview(name, arguments_, before, upstream);
       const summary = summarize(name, targets, before, arguments_);
       const approved = await options.approval.request({
@@ -133,7 +161,10 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
         return failure("The target changed while approval was pending. Review and retry.");
       }
 
-      const result = (await upstream.callTool(request.params)) as CallToolResult;
+      const result =
+        name === DELETE_FILE
+          ? await deleteFile(targets[0])
+          : ((await upstream.callTool(request.params)) as CallToolResult);
       if (result.isError) return result;
       const after = await Promise.all(targets.map((target) => options.snapshots.capture(target)));
       const paths: PathChange[] = targets.map((target, index) => ({
@@ -294,6 +325,9 @@ async function preview(
   if (name === "move_file") {
     return `Move or rename:\n${String(args.source)}\n→ ${String(args.destination)}`;
   }
+  if (name === DELETE_FILE) {
+    return `Delete file:\n${String(args.path)}\n\nThe captured snapshot can be restored unless the path is recreated before undo.`;
+  }
   return `Create directory, including missing parents:\n${String(args.path)}`;
 }
 
@@ -311,7 +345,13 @@ function summarize(
     return `Apply ${count} edit${count === 1 ? "" : "s"} to ${targets[0]}`;
   }
   if (name === "move_file") return `Move ${targets[0]} to ${targets[1]}`;
+  if (name === DELETE_FILE) return `Delete ${targets[0]}`;
   return `Create directory ${targets[0]}`;
+}
+
+async function deleteFile(target: string): Promise<CallToolResult> {
+  await rm(target);
+  return success(`Deleted ${target}. Agent Rewind recorded a restorable snapshot.`);
 }
 
 function commonParent(targets: string[]): string {
