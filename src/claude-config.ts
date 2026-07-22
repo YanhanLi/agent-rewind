@@ -1,26 +1,19 @@
-import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  buildLaunchCommand,
+  type ConfigUpdateResult,
+  persistConfigSource,
+  SERVER_NAME,
+  type UpdateOptions,
+} from "./config-file.js";
 
-export const SERVER_NAME = "filesystem-with-rewind";
+export { SERVER_NAME } from "./config-file.js";
 
 export interface ClaudeServerConfig {
   command: string;
   args: string[];
-}
-
-export interface ConfigUpdateResult {
-  filename: string;
-  backup?: string;
-  changed: boolean;
-  config: Record<string, unknown>;
-}
-
-interface UpdateOptions {
-  filename?: string;
-  dryRun?: boolean;
-  now?: Date;
 }
 
 export function defaultClaudeConfigPath(homeDirectory = os.homedir()): string {
@@ -37,16 +30,10 @@ export function defaultClaudeConfigPath(homeDirectory = os.homedir()): string {
 }
 
 export function buildClaudeServerConfig(roots: string[]): ClaudeServerConfig {
+  const [command, ...args] = buildLaunchCommand(roots);
   return {
-    command: "npm",
-    args: [
-      "exec",
-      "--yes",
-      "--package=github:YanhanLi/agent-rewind",
-      "--",
-      "agent-rewind",
-      ...roots,
-    ],
+    command,
+    args,
   };
 }
 
@@ -68,7 +55,12 @@ export async function installClaudeConfig(
   }
   mcpServers[SERVER_NAME] = desired;
   config.mcpServers = mcpServers;
-  const backup = await persist(filename, config, exists, options);
+  const backup = await persistConfigSource(
+    filename,
+    `${JSON.stringify(config, null, 2)}\n`,
+    exists,
+    options,
+  );
   return { filename, backup, changed: true, config };
 }
 
@@ -81,7 +73,12 @@ export async function uninstallClaudeConfig(
   if (!(SERVER_NAME in mcpServers)) return { filename, changed: false, config };
   delete mcpServers[SERVER_NAME];
   config.mcpServers = mcpServers;
-  const backup = await persist(filename, config, exists, options);
+  const backup = await persistConfigSource(
+    filename,
+    `${JSON.stringify(config, null, 2)}\n`,
+    exists,
+    options,
+  );
   return { filename, backup, changed: true, config };
 }
 
@@ -122,31 +119,6 @@ function objectProperty(config: Record<string, unknown>, key: string): Record<st
   if (value === undefined) return {};
   if (!isObject(value)) throw new Error(`Claude configuration property ${key} must be an object`);
   return { ...value };
-}
-
-async function persist(
-  filename: string,
-  config: Record<string, unknown>,
-  exists: boolean,
-  options: UpdateOptions,
-): Promise<string | undefined> {
-  if (options.dryRun) return undefined;
-  await mkdir(path.dirname(filename), { recursive: true });
-  let backup: string | undefined;
-  if (exists) {
-    const stamp = (options.now ?? new Date()).toISOString().replace(/[:.]/g, "-");
-    backup = `${filename}.backup-${stamp}`;
-    await copyFile(filename, backup);
-  }
-  const temporary = path.join(path.dirname(filename), `.agent-rewind-${process.pid}-${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-    await rename(temporary, filename);
-  } catch (error) {
-    await rm(temporary, { force: true });
-    throw error;
-  }
-  return backup;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

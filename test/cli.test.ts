@@ -15,7 +15,7 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.6.0");
+    expect(output.trim()).toBe("agent-rewind 0.7.0");
   });
 
   it("prints an empty local validation report as JSON", async () => {
@@ -58,6 +58,30 @@ describe("CLI", () => {
         root,
       ],
     });
+  });
+
+  it("generates OpenCode JSON and Codex TOML configurations", () => {
+    const root = path.resolve("test-workspace");
+    const openCodeOutput = execFileSync(
+      process.execPath,
+      [path.resolve("dist/cli.js"), "config", "opencode", root],
+      { encoding: "utf8" },
+    );
+    const openCode = JSON.parse(openCodeOutput) as {
+      mcp: { "filesystem-with-rewind": { type: string; command: string[] } };
+    };
+    expect(openCode.mcp["filesystem-with-rewind"]).toMatchObject({
+      type: "local",
+      command: expect.arrayContaining(["agent-rewind", root]),
+    });
+
+    const codex = execFileSync(
+      process.execPath,
+      [path.resolve("dist/cli.js"), "config", "codex", root],
+      { encoding: "utf8" },
+    );
+    expect(codex).toContain("[mcp_servers.filesystem-with-rewind]");
+    expect(codex).toContain(JSON.stringify(root));
   });
 
   it("installs and uninstalls its Claude entry without removing existing servers", async () => {

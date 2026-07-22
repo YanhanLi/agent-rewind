@@ -12,15 +12,29 @@ import {
   installClaudeConfig,
   uninstallClaudeConfig,
 } from "./claude-config.js";
+import {
+  buildCodexConfigFragment,
+  defaultCodexConfigPath,
+  inspectCodexConfig,
+  installCodexConfig,
+  uninstallCodexConfig,
+} from "./codex-config.js";
 import { Ledger } from "./ledger.js";
 import type { ValidationReport } from "./model.js";
+import {
+  buildOpenCodeConfigFragment,
+  defaultOpenCodeConfigPath,
+  inspectOpenCodeConfig,
+  installOpenCodeConfig,
+  uninstallOpenCodeConfig,
+} from "./opencode-config.js";
 import { startProxy } from "./proxy.js";
 import { RewindService } from "./rewind-service.js";
 import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.6.0\n");
+    process.stdout.write("agent-rewind 0.7.0\n");
     return;
   }
   if (process.argv[2] === "report") {
@@ -31,16 +45,16 @@ async function main(): Promise<void> {
     await doctor(process.argv.slice(3));
     return;
   }
-  if (process.argv[2] === "config" && process.argv[3] === "claude") {
-    printClaudeConfig(process.argv.slice(4));
+  if (process.argv[2] === "config") {
+    printClientConfig(process.argv[3], process.argv.slice(4));
     return;
   }
-  if (process.argv[2] === "install" && process.argv[3] === "claude") {
-    await installClaude(process.argv.slice(4));
+  if (process.argv[2] === "install") {
+    await installClient(process.argv[3], process.argv.slice(4));
     return;
   }
-  if (process.argv[2] === "uninstall" && process.argv[3] === "claude") {
-    await uninstallClaude(process.argv.slice(4));
+  if (process.argv[2] === "uninstall") {
+    await uninstallClient(process.argv[3], process.argv.slice(4));
     return;
   }
   const parsed = parseArguments(process.argv.slice(2));
@@ -82,7 +96,7 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
       }
     } else if (args[index] === "--help" || args[index] === "-h") {
       process.stderr.write(
-        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config claude <allowed-directory> [...]\n       agent-rewind install claude [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall claude [--dry-run]\n       agent-rewind --version\n",
+        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config <claude|opencode|codex> <allowed-directory> [...]\n       agent-rewind install <claude|opencode|codex> [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall <claude|opencode|codex> [--dry-run]\n       agent-rewind --version\n",
       );
       process.exit(0);
     } else {
@@ -93,14 +107,23 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
   return { roots: [...new Set(roots)], port };
 }
 
-function printClaudeConfig(args: string[]): void {
-  if (args.length === 0) throw new Error("config claude requires at least one allowed directory");
+function printClientConfig(client: string | undefined, args: string[]): void {
+  if (!isClient(client)) throw new Error("config requires claude, opencode, or codex");
+  if (args.length === 0) throw new Error(`config ${client} requires at least one allowed directory`);
   const roots = [...new Set(args.map((value) => path.resolve(value)))];
-  process.stdout.write(`${JSON.stringify(buildClaudeConfigFragment(roots), null, 2)}\n`);
+  if (client === "codex") {
+    process.stdout.write(buildCodexConfigFragment(roots));
+    return;
+  }
+  const config =
+    client === "claude" ? buildClaudeConfigFragment(roots) : buildOpenCodeConfigFragment(roots);
+  process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
 }
 
-async function installClaude(args: string[]): Promise<void> {
+async function installClient(client: string | undefined, args: string[]): Promise<void> {
+  if (!isClient(client)) throw new Error("install requires claude, opencode, or codex");
   const { dryRun, values } = parseDryRun(args);
+  if (values.length === 0) throw new Error(`install ${client} requires at least one allowed directory`);
   const roots = [...new Set(values.map((value) => path.resolve(value)))];
   for (const root of roots) {
     try {
@@ -109,35 +132,60 @@ async function installClaude(args: string[]): Promise<void> {
       throw new Error(`Allowed directory is not readable/writable: ${root}`);
     }
   }
-  const result = await installClaudeConfig(roots, { dryRun });
+  const result =
+    client === "claude"
+      ? await installClaudeConfig(roots, { dryRun })
+      : client === "opencode"
+        ? await installOpenCodeConfig(roots, { dryRun })
+        : await installCodexConfig(roots, { dryRun });
   if (dryRun) {
-    process.stdout.write(`${JSON.stringify(result.config, null, 2)}\n`);
+    process.stdout.write(
+      client === "codex"
+        ? buildCodexConfigFragment(roots)
+        : `${JSON.stringify(result.config, null, 2)}\n`,
+    );
     return;
   }
   if (!result.changed) {
-    process.stdout.write(`Claude Desktop is already configured: ${result.filename}\n`);
+    process.stdout.write(`${clientLabel(client)} is already configured: ${result.filename}\n`);
     return;
   }
-  process.stdout.write(`Updated Claude Desktop configuration: ${result.filename}\n`);
+  process.stdout.write(`Updated ${clientLabel(client)} configuration: ${result.filename}\n`);
   if (result.backup) process.stdout.write(`Backup: ${result.backup}\n`);
-  process.stdout.write("Restart Claude Desktop to apply the change.\n");
+  process.stdout.write(`Restart ${clientLabel(client)} to apply the change.\n`);
 }
 
-async function uninstallClaude(args: string[]): Promise<void> {
+async function uninstallClient(client: string | undefined, args: string[]): Promise<void> {
+  if (!isClient(client)) throw new Error("uninstall requires claude, opencode, or codex");
   const { dryRun, values } = parseDryRun(args);
-  if (values.length > 0) throw new Error("uninstall claude accepts only --dry-run");
-  const result = await uninstallClaudeConfig({ dryRun });
+  if (values.length > 0) throw new Error(`uninstall ${client} accepts only --dry-run`);
+  const result =
+    client === "claude"
+      ? await uninstallClaudeConfig({ dryRun })
+      : client === "opencode"
+        ? await uninstallOpenCodeConfig({ dryRun })
+        : await uninstallCodexConfig({ dryRun });
   if (dryRun) {
     process.stdout.write(`${JSON.stringify(result.config, null, 2)}\n`);
     return;
   }
   if (!result.changed) {
-    process.stdout.write(`Agent Rewind is not configured in: ${result.filename}\n`);
+    process.stdout.write(`Agent Rewind is not configured for ${clientLabel(client)}: ${result.filename}\n`);
     return;
   }
-  process.stdout.write(`Removed Agent Rewind from: ${result.filename}\n`);
+  process.stdout.write(`Removed Agent Rewind from ${clientLabel(client)}: ${result.filename}\n`);
   if (result.backup) process.stdout.write(`Backup: ${result.backup}\n`);
-  process.stdout.write("Restart Claude Desktop to apply the change.\n");
+  process.stdout.write(`Restart ${clientLabel(client)} to apply the change.\n`);
+}
+
+type ClientName = "claude" | "opencode" | "codex";
+
+function isClient(value: string | undefined): value is ClientName {
+  return value === "claude" || value === "opencode" || value === "codex";
+}
+
+function clientLabel(client: ClientName): string {
+  return client === "claude" ? "Claude Desktop" : client === "opencode" ? "OpenCode" : "Codex";
 }
 
 function parseDryRun(args: string[]): { dryRun: boolean; values: string[] } {
@@ -251,6 +299,42 @@ async function doctor(args: string[]): Promise<void> {
         : claudeState === "missing"
           ? `not configured in ${claudeFilename}`
           : `invalid configuration at ${claudeFilename}`,
+  });
+
+  const openCodeFilename = defaultOpenCodeConfigPath();
+  const openCodeState = await inspectOpenCodeConfig(openCodeFilename);
+  checks.push({
+    name: "OpenCode",
+    ok: openCodeState !== "invalid",
+    warning: openCodeState === "missing",
+    detail:
+      openCodeState === "configured"
+        ? `configured in ${openCodeFilename}`
+        : openCodeState === "missing"
+          ? `not configured in ${openCodeFilename}`
+          : `invalid configuration at ${openCodeFilename}`,
+  });
+
+  const codexFilename = defaultCodexConfigPath();
+  const codexState = await inspectCodexConfig();
+  checks.push({
+    name: "Codex",
+    ok: codexState !== "invalid",
+    warning: codexState === "missing" || codexState === "unavailable",
+    detail:
+      codexState === "configured"
+        ? `configured in ${codexFilename}`
+        : codexState === "missing"
+          ? `not configured in ${codexFilename}`
+          : codexState === "unavailable"
+            ? "CLI not found"
+            : `could not inspect configuration at ${codexFilename}`,
+  });
+  checks.push({
+    name: "Client bypass boundary",
+    ok: true,
+    warning: true,
+    detail: "Codex/OpenCode built-in edit and shell tools are outside this MCP proxy",
   });
 
   process.stdout.write(

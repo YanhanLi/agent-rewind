@@ -1,6 +1,6 @@
 {
   "name": "agent-rewind",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Preview and safely undo filesystem actions made through MCP.",
   "type": "module",
   "bin": {
@@ -8,6 +8,7 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md"
   ],
   "scripts": {
@@ -25,6 +26,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@modelcontextprotocol/server-filesystem": "^2026.7.10",
     "diff": "^8.0.2",
+    "jsonc-parser": "^3.3.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
