@@ -35,6 +35,8 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     await client.connect(transport);
     const tools = await client.listTools();
     expect(tools.tools.some((tool) => tool.name === "write_file")).toBe(true);
+    expect(tools.tools.some((tool) => tool.name === "rewind_begin_change_set")).toBe(true);
+    expect(tools.tools.some((tool) => tool.name === "rewind_end_change_set")).toBe(true);
     expect((await fetch(`http://127.0.0.1:${port}/api/state`)).status).toBe(403);
     expect(
       (
@@ -55,6 +57,12 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     });
     expect(escaped.isError).toBe(true);
 
+    const begun = await client.callTool({
+      name: "rewind_begin_change_set",
+      arguments: { label: "Integration task" },
+    });
+    expect(begun.isError).not.toBe(true);
+
     const call = client.callTool({
       name: "write_file",
       arguments: { path: target, content: "agent change\n" },
@@ -71,14 +79,24 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     });
     expect(autoApproved.isError).not.toBe(true);
 
+    await client.callTool({ name: "rewind_end_change_set", arguments: {} });
+    const outsideSet = path.join(root, "outside-set.txt");
+    const outsideResult = await client.callTool({
+      name: "write_file",
+      arguments: { path: outsideSet, content: "keep this\n" },
+    });
+    expect(outsideResult.isError).not.toBe(true);
+
     const recorded = await stateFor(port, token);
-    expect(recorded.changeSets).toHaveLength(1);
-    expect(recorded.changeSets[0].actionCount).toBe(2);
-    await post(port, token, `/api/change-sets/${recorded.changeSets[0].id}/undo`);
+    expect(recorded.changeSets).toHaveLength(2);
+    const taskSet = recorded.changeSets.find((changeSet) => changeSet.label === "Integration task");
+    expect(taskSet?.actionCount).toBe(2);
+    await post(port, token, `/api/change-sets/${taskSet!.id}/undo`);
     expect(await readFile(target, "utf8")).toBe("original\n");
     await expect(readFile(path.join(root, "second.txt"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
+    expect(await readFile(outsideSet, "utf8")).toBe("keep this\n");
   } finally {
     await transport.close();
   }
@@ -87,7 +105,7 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
 interface UiState {
   pending: Array<{ id: string }>;
   changes: Array<{ id: string; summary: string }>;
-  changeSets: Array<{ id: string; actionCount: number }>;
+  changeSets: Array<{ id: string; label?: string; actionCount: number }>;
 }
 
 async function stateFor(port: number, token: string): Promise<UiState> {

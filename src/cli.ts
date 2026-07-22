@@ -11,8 +11,16 @@ import { RewindService } from "./rewind-service.js";
 import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "--version" || process.argv[2] === "-v") {
+    process.stdout.write("agent-rewind 0.4.0\n");
+    return;
+  }
   if (process.argv[2] === "doctor") {
     await doctor(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === "config" && process.argv[3] === "claude") {
+    printClaudeConfig(process.argv.slice(4));
     return;
   }
   const parsed = parseArguments(process.argv.slice(2));
@@ -56,7 +64,7 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
       }
     } else if (args[index] === "--help" || args[index] === "-h") {
       process.stderr.write(
-        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n",
+        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind config claude <allowed-directory> [...]\n       agent-rewind --version\n",
       );
       process.exit(0);
     } else {
@@ -65,6 +73,25 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
   }
   if (roots.length === 0) throw new Error("Provide at least one allowed directory.");
   return { roots: [...new Set(roots)], port };
+}
+
+function printClaudeConfig(args: string[]): void {
+  if (args.length === 0) throw new Error("config claude requires at least one allowed directory");
+  const roots = [...new Set(args.map((value) => path.resolve(value)))];
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          "filesystem-with-rewind": {
+            command: "npx",
+            args: ["--yes", "github:YanhanLi/agent-rewind", ...roots],
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 function megabytesFromEnvironment(name: string, fallback: number): number {

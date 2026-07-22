@@ -18,6 +18,8 @@ import type { Ledger } from "./ledger.js";
 import type { SnapshotStore } from "./snapshot-store.js";
 
 const MUTATING_TOOLS = new Set(["write_file", "edit_file", "create_directory", "move_file"]);
+const BEGIN_CHANGE_SET = "rewind_begin_change_set";
+const END_CHANGE_SET = "rewind_end_change_set";
 
 interface ProxyOptions {
   roots: string[];
@@ -28,7 +30,7 @@ interface ProxyOptions {
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.3.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.4.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const require = createRequire(import.meta.url);
   const filesystemPackage = require.resolve("@modelcontextprotocol/server-filesystem/package.json");
@@ -41,7 +43,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.3.0" },
+    { name: "agent-rewind", version: "0.4.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -49,20 +51,59 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     const result = await upstream.listTools();
     return {
       ...result,
-      tools: result.tools.map((tool) =>
-        MUTATING_TOOLS.has(tool.name)
-          ? {
-              ...tool,
-              description: `${tool.description ?? tool.name}\n\nAgent Rewind previews this operation and requires local approval before execution.`,
-            }
-          : tool,
-      ),
+      tools: [
+        ...result.tools.map((tool) =>
+          MUTATING_TOOLS.has(tool.name)
+            ? {
+                ...tool,
+                description: `${tool.description ?? tool.name}\n\nAgent Rewind previews this operation and requires local approval before execution.`,
+              }
+            : tool,
+        ),
+        {
+          name: BEGIN_CHANGE_SET,
+          description:
+            "Start a named Agent Rewind change set before a multi-step filesystem task. Subsequent filesystem mutations are grouped until rewind_end_change_set is called.",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              label: {
+                type: "string",
+                maxLength: 120,
+                description: "Short user-facing task name.",
+              },
+            },
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+        },
+        {
+          name: END_CHANGE_SET,
+          description:
+            "End the current Agent Rewind change set after a multi-step filesystem task is complete.",
+          inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
+          annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+        },
+      ],
     };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: rawArguments } = request.params;
     const arguments_ = (rawArguments ?? {}) as Record<string, unknown>;
+    if (name === BEGIN_CHANGE_SET) {
+      try {
+        const label = optionalLabel(arguments_.label);
+        const id = changeSets.begin(label);
+        return success(`Started change set ${id}${label ? `: ${label}` : ""}.`);
+      } catch (error) {
+        return failure((error as Error).message);
+      }
+    }
+    if (name === END_CHANGE_SET) {
+      const ended = changeSets.end();
+      return success(ended ? `Ended change set ${ended}.` : "No change set was active.");
+    }
     if (!MUTATING_TOOLS.has(name) || (name === "edit_file" && arguments_.dryRun === true)) {
       return upstream.callTool(request.params) as Promise<CallToolResult>;
     }
@@ -101,9 +142,11 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
         after: after[index],
       }));
       if (paths.some((item) => item.before.hash !== item.after.hash)) {
+        const changeSet = changeSets.next();
         const record: ChangeRecord = {
           id: randomUUID(),
-          changeSetId: changeSets.next(),
+          changeSetId: changeSet.id,
+          changeSetLabel: changeSet.label,
           tool: name,
           summary,
           createdAt: new Date().toISOString(),
@@ -122,18 +165,38 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
 }
 
 class ChangeSetTracker {
-  private current?: { id: string; lastActivity: number };
+  private current?: { id: string; label?: string; lastActivity: number };
 
   constructor(private readonly windowMs: number) {}
 
-  next(now = Date.now()): string {
+  begin(label?: string, now = Date.now()): string {
+    this.current = { id: randomUUID(), label, lastActivity: now };
+    return this.current.id;
+  }
+
+  end(): string | undefined {
+    const id = this.current?.id;
+    this.current = undefined;
+    return id;
+  }
+
+  next(now = Date.now()): { id: string; label?: string } {
     if (!this.current || now - this.current.lastActivity > this.windowMs) {
       this.current = { id: randomUUID(), lastActivity: now };
     } else {
       this.current.lastActivity = now;
     }
-    return this.current.id;
+    return { id: this.current.id, label: this.current.label };
   }
+}
+
+function optionalLabel(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error("Expected label to be a string");
+  const label = value.trim();
+  if (label.length === 0) return undefined;
+  if (label.length > 120) throw new Error("Change-set label must be at most 120 characters");
+  return label;
 }
 
 async function targetPaths(
@@ -288,4 +351,8 @@ function denied(name: string): CallToolResult {
 
 function failure(message: string): CallToolResult {
   return { isError: true, content: [{ type: "text", text: message }] };
+}
+
+function success(message: string): CallToolResult {
+  return { content: [{ type: "text", text: message }] };
 }

@@ -12,6 +12,7 @@ export interface PathChange {
 export interface ChangeRecord {
   id: string;
   changeSetId: string;
+  changeSetLabel?: string;
   tool: string;
   summary: string;
   createdAt: string;
@@ -21,6 +22,7 @@ export interface ChangeRecord {
 
 export interface ChangeSetView {
   id: string;
+  label?: string;
   createdAt: string;
   updatedAt: string;
   status: "applied" | "undone" | "conflict" | "partial";

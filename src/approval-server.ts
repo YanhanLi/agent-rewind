@@ -17,12 +17,16 @@ export class ApprovalServer {
   private readonly token = process.env.AGENT_REWIND_TOKEN ?? randomBytes(24).toString("base64url");
   private httpServer?: Server;
   private activePort = 0;
-  private opened = false;
+  private lastHeartbeat = 0;
+  private lastBrowserOpen = 0;
 
   constructor(
     private readonly rewind: RewindService,
     private readonly requestedPort: number,
     private readonly timeoutMs = 120_000,
+    private readonly openBrowser: (url: string) => void = (url) => {
+      execFile("open", [url]);
+    },
   ) {}
 
   async start(): Promise<void> {
@@ -49,9 +53,14 @@ export class ApprovalServer {
       id,
       expiresAt: new Date(Date.now() + this.timeoutMs).toISOString(),
     };
-    if (!this.opened && process.platform === "darwin") {
-      this.opened = true;
-      execFile("open", [this.url()]);
+    const now = Date.now();
+    if (
+      process.platform === "darwin" &&
+      now - this.lastHeartbeat > 3_000 &&
+      now - this.lastBrowserOpen > 3_000
+    ) {
+      this.lastBrowserOpen = now;
+      this.openBrowser(this.url());
     }
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
@@ -107,6 +116,7 @@ export class ApprovalServer {
       }
       if (!this.authorized(request)) return this.unauthorized(response);
       if (request.method === "GET" && requestUrl.pathname === "/api/state") {
+        this.lastHeartbeat = Date.now();
         response.end(
           JSON.stringify({
             pending: [...this.pending.values()].map(({ request: item }) => item),
@@ -180,7 +190,9 @@ function page(token: string): string {
 </style></head><body><header><h1>Agent Rewind</h1><span>Local approval and recovery</span></header><main><h2>Waiting for approval</h2><div id="pending"></div><h2>Change history</h2><div id="history"></div></main><script>
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const token=${JSON.stringify(token)};const headers={'X-Agent-Rewind-Token':token};
+const countSummary=x=>x.actionCount+' action'+(x.actionCount===1?'':'s')+' across '+x.affectedPaths.length+' path'+(x.affectedPaths.length===1?'':'s');
+const setTitle=x=>x.label?esc(x.label):countSummary(x);const setMeta=x=>(x.label?countSummary(x)+' · ':'')+new Date(x.createdAt).toLocaleString()+' · change set '+esc(x.id.slice(0,8));
 async function post(url){const r=await fetch(url,{method:'POST',headers});const body=await r.json();if(!r.ok)alert(body.error);await refresh()}
-async function refresh(){const r=await fetch('/api/state',{headers});if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject')">Reject</button> <button onclick="post('/api/approvals/\${x.id}/approve-session')">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve')">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';document.querySelector('#history').innerHTML=s.changeSets.length?s.changeSets.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${x.actionCount} action\${x.actionCount===1?'':'s'} across \${x.affectedPaths.length} path\${x.affectedPaths.length===1?'':'s'}</div><div class="meta">\${new Date(x.createdAt).toLocaleString()} · change set \${esc(x.id.slice(0,8))}</div></div><div><span class="status">\${esc(x.status)}</span> \${x.status==='applied'?\`<button class="undo" onclick="post('/api/change-sets/\${x.id}/undo')">Undo set</button>\`:''}</div></div><div class="paths">\${x.affectedPaths.map(esc).join('<br>')}</div><div class="actions">\${x.changes.map(c=>\`<div class="action">\${esc(c.summary)}</div>\`).join('')}</div></div>\`).join(''):'<div class="empty">No recorded changes yet.</div>'}refresh();setInterval(refresh,1000);
+async function refresh(){const r=await fetch('/api/state',{headers});if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject')">Reject</button> <button onclick="post('/api/approvals/\${x.id}/approve-session')">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve')">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';document.querySelector('#history').innerHTML=s.changeSets.length?s.changeSets.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status">\${esc(x.status)}</span> \${x.status==='applied'?\`<button class="undo" onclick="post('/api/change-sets/\${x.id}/undo')">Undo set</button>\`:''}</div></div><div class="paths">\${x.affectedPaths.map(esc).join('<br>')}</div><div class="actions">\${x.changes.map(c=>\`<div class="action">\${esc(c.summary)}</div>\`).join('')}</div></div>\`).join(''):'<div class="empty">No recorded changes yet.</div>'}refresh();setInterval(refresh,1000);
 </script></body></html>`;
 }

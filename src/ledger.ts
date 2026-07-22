@@ -106,6 +106,7 @@ function toChangeSet(id: string, input: ChangeRecord[]): ChangeSetView {
         : "partial";
   return {
     id,
+    label: changes.find((change) => change.changeSetLabel)?.changeSetLabel,
     createdAt: changes[0].createdAt,
     updatedAt: changes.at(-1)!.createdAt,
     status,
