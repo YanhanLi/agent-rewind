@@ -1,13 +1,21 @@
 import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((item) => rm(item, { recursive: true })));
+});
 
 describe("CLI", () => {
   it("prints its version", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.4.1");
+    expect(output.trim()).toBe("agent-rewind 0.5.0");
   });
 
   it("generates a Claude Desktop configuration", () => {
@@ -31,5 +39,41 @@ describe("CLI", () => {
         root,
       ],
     });
+  });
+
+  it("installs and uninstalls its Claude entry without removing existing servers", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-cli-"));
+    temporaryDirectories.push(directory);
+    const filename = path.join(directory, "Claude", "config.json");
+    await mkdir(path.dirname(filename), { recursive: true });
+    await writeFile(
+      filename,
+      JSON.stringify({ mcpServers: { existing: { command: "existing-server" } } }),
+    );
+    const env = { ...process.env, AGENT_REWIND_CLAUDE_CONFIG: filename };
+    const root = path.join(directory, "workspace");
+    await mkdir(root);
+
+    const installed = execFileSync(
+      process.execPath,
+      [path.resolve("dist/cli.js"), "install", "claude", root],
+      { encoding: "utf8", env },
+    );
+    expect(installed).toContain("Updated Claude Desktop configuration");
+    const afterInstall = JSON.parse(await readFile(filename, "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(afterInstall.mcpServers.existing).toBeDefined();
+    expect(afterInstall.mcpServers["filesystem-with-rewind"]).toBeDefined();
+
+    execFileSync(process.execPath, [path.resolve("dist/cli.js"), "uninstall", "claude"], {
+      encoding: "utf8",
+      env,
+    });
+    const afterUninstall = JSON.parse(await readFile(filename, "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(afterUninstall.mcpServers.existing).toBeDefined();
+    expect(afterUninstall.mcpServers["filesystem-with-rewind"]).toBeUndefined();
   });
 });

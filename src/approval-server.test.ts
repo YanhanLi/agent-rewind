@@ -36,7 +36,13 @@ describe("ApprovalServer", () => {
       undo: async () => undefined,
       undoChangeSet: async () => undefined,
     } as unknown as RewindService;
-    const approval = new ApprovalServer(rewind, 32_190, 120_000, (url) => opened.push(url));
+    const approval = new ApprovalServer(
+      rewind,
+      32_190,
+      120_000,
+      (url) => opened.push(url),
+      "darwin",
+    );
     await approval.start();
     cleanup.push(async () => {
       await approval.stop();

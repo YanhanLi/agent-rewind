@@ -27,6 +27,7 @@ export class ApprovalServer {
     private readonly openBrowser: (url: string) => void = (url) => {
       execFile("open", [url]);
     },
+    private readonly platform = process.platform,
   ) {}
 
   async start(): Promise<void> {
@@ -55,7 +56,7 @@ export class ApprovalServer {
     };
     const now = Date.now();
     if (
-      process.platform === "darwin" &&
+      this.platform === "darwin" &&
       now - this.lastHeartbeat > 3_000 &&
       now - this.lastBrowserOpen > 3_000
     ) {

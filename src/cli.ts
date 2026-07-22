@@ -5,6 +5,13 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { ApprovalServer } from "./approval-server.js";
+import {
+  buildClaudeConfigFragment,
+  defaultClaudeConfigPath,
+  inspectClaudeConfig,
+  installClaudeConfig,
+  uninstallClaudeConfig,
+} from "./claude-config.js";
 import { Ledger } from "./ledger.js";
 import { startProxy } from "./proxy.js";
 import { RewindService } from "./rewind-service.js";
@@ -12,7 +19,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.4.1\n");
+    process.stdout.write("agent-rewind 0.5.0\n");
     return;
   }
   if (process.argv[2] === "doctor") {
@@ -21,6 +28,14 @@ async function main(): Promise<void> {
   }
   if (process.argv[2] === "config" && process.argv[3] === "claude") {
     printClaudeConfig(process.argv.slice(4));
+    return;
+  }
+  if (process.argv[2] === "install" && process.argv[3] === "claude") {
+    await installClaude(process.argv.slice(4));
+    return;
+  }
+  if (process.argv[2] === "uninstall" && process.argv[3] === "claude") {
+    await uninstallClaude(process.argv.slice(4));
     return;
   }
   const parsed = parseArguments(process.argv.slice(2));
@@ -64,7 +79,7 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
       }
     } else if (args[index] === "--help" || args[index] === "-h") {
       process.stderr.write(
-        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind config claude <allowed-directory> [...]\n       agent-rewind --version\n",
+        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind config claude <allowed-directory> [...]\n       agent-rewind install claude [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall claude [--dry-run]\n       agent-rewind --version\n",
       );
       process.exit(0);
     } else {
@@ -78,27 +93,54 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
 function printClaudeConfig(args: string[]): void {
   if (args.length === 0) throw new Error("config claude requires at least one allowed directory");
   const roots = [...new Set(args.map((value) => path.resolve(value)))];
-  process.stdout.write(
-    `${JSON.stringify(
-      {
-        mcpServers: {
-          "filesystem-with-rewind": {
-            command: "npm",
-            args: [
-              "exec",
-              "--yes",
-              "--package=github:YanhanLi/agent-rewind",
-              "--",
-              "agent-rewind",
-              ...roots,
-            ],
-          },
-        },
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  process.stdout.write(`${JSON.stringify(buildClaudeConfigFragment(roots), null, 2)}\n`);
+}
+
+async function installClaude(args: string[]): Promise<void> {
+  const { dryRun, values } = parseDryRun(args);
+  const roots = [...new Set(values.map((value) => path.resolve(value)))];
+  for (const root of roots) {
+    try {
+      await access(root, constants.R_OK | constants.W_OK);
+    } catch {
+      throw new Error(`Allowed directory is not readable/writable: ${root}`);
+    }
+  }
+  const result = await installClaudeConfig(roots, { dryRun });
+  if (dryRun) {
+    process.stdout.write(`${JSON.stringify(result.config, null, 2)}\n`);
+    return;
+  }
+  if (!result.changed) {
+    process.stdout.write(`Claude Desktop is already configured: ${result.filename}\n`);
+    return;
+  }
+  process.stdout.write(`Updated Claude Desktop configuration: ${result.filename}\n`);
+  if (result.backup) process.stdout.write(`Backup: ${result.backup}\n`);
+  process.stdout.write("Restart Claude Desktop to apply the change.\n");
+}
+
+async function uninstallClaude(args: string[]): Promise<void> {
+  const { dryRun, values } = parseDryRun(args);
+  if (values.length > 0) throw new Error("uninstall claude accepts only --dry-run");
+  const result = await uninstallClaudeConfig({ dryRun });
+  if (dryRun) {
+    process.stdout.write(`${JSON.stringify(result.config, null, 2)}\n`);
+    return;
+  }
+  if (!result.changed) {
+    process.stdout.write(`Agent Rewind is not configured in: ${result.filename}\n`);
+    return;
+  }
+  process.stdout.write(`Removed Agent Rewind from: ${result.filename}\n`);
+  if (result.backup) process.stdout.write(`Backup: ${result.backup}\n`);
+  process.stdout.write("Restart Claude Desktop to apply the change.\n");
+}
+
+function parseDryRun(args: string[]): { dryRun: boolean; values: string[] } {
+  const unknown = args.filter((value) => value.startsWith("-") && value !== "--dry-run");
+  if (unknown.length > 0) throw new Error(`Unknown option: ${unknown[0]}`);
+  return { dryRun: args.includes("--dry-run"), values: args.filter((value) => value !== "--dry-run") };
 }
 
 function megabytesFromEnvironment(name: string, fallback: number): number {
@@ -122,7 +164,7 @@ function millisecondsFromEnvironment(name: string, fallback: number): number {
 
 async function doctor(args: string[]): Promise<void> {
   if (args.length === 0) throw new Error("doctor requires at least one allowed directory");
-  const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+  const checks: Array<{ name: string; ok: boolean; warning?: boolean; detail: string }> = [];
   const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
   checks.push({
     name: "Node.js",
@@ -159,8 +201,22 @@ async function doctor(args: string[]): Promise<void> {
     checks.push({ name: "Data directory", ok: false, detail: `${dataDirectory} is not writable` });
   }
 
+  const claudeFilename = defaultClaudeConfigPath();
+  const claudeState = await inspectClaudeConfig(claudeFilename);
+  checks.push({
+    name: "Claude Desktop",
+    ok: claudeState !== "invalid",
+    warning: claudeState === "missing",
+    detail:
+      claudeState === "configured"
+        ? `configured in ${claudeFilename}`
+        : claudeState === "missing"
+          ? `not configured in ${claudeFilename}`
+          : `invalid configuration at ${claudeFilename}`,
+  });
+
   process.stdout.write(
-    `${checks.map((check) => `${check.ok ? "PASS" : "FAIL"}  ${check.name}: ${check.detail}`).join("\n")}\n`,
+    `${checks.map((check) => `${!check.ok ? "FAIL" : check.warning ? "WARN" : "PASS"}  ${check.name}: ${check.detail}`).join("\n")}\n`,
   );
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
 }
