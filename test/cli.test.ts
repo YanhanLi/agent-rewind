@@ -15,7 +15,7 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.7.0");
+    expect(output.trim()).toBe("agent-rewind 0.8.0");
   });
 
   it("prints an empty local validation report as JSON", async () => {
@@ -118,5 +118,31 @@ describe("CLI", () => {
     };
     expect(afterUninstall.mcpServers.existing).toBeDefined();
     expect(afterUninstall.mcpServers["filesystem-with-rewind"]).toBeUndefined();
+  });
+
+  it("installs and removes OpenCode and Codex guards in isolated paths", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-guards-cli-"));
+    temporaryDirectories.push(directory);
+    const openCodeGuard = path.join(directory, "opencode", "agent-rewind-guard.js");
+    const codexHooks = path.join(directory, "codex", "hooks.json");
+    const codexGuard = path.join(directory, "data", "codex-guard.mjs");
+    const env = {
+      ...process.env,
+      AGENT_REWIND_OPENCODE_GUARD: openCodeGuard,
+      AGENT_REWIND_CODEX_HOOKS: codexHooks,
+      AGENT_REWIND_CODEX_GUARD: codexGuard,
+    };
+
+    execFileSync(process.execPath, [path.resolve("dist/cli.js"), "guard", "opencode"], { env });
+    execFileSync(process.execPath, [path.resolve("dist/cli.js"), "guard", "codex"], { env });
+    expect(await readFile(openCodeGuard, "utf8")).toContain("tool.execute.before");
+    expect(await readFile(codexHooks, "utf8")).toContain("PreToolUse");
+    expect(await readFile(codexGuard, "utf8")).toContain("permissionDecision");
+
+    execFileSync(process.execPath, [path.resolve("dist/cli.js"), "unguard", "opencode"], { env });
+    execFileSync(process.execPath, [path.resolve("dist/cli.js"), "unguard", "codex"], { env });
+    await expect(readFile(openCodeGuard, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(codexGuard, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(codexHooks, "utf8")).not.toContain("apply_patch");
   });
 });

@@ -19,6 +19,11 @@ import {
   installCodexConfig,
   uninstallCodexConfig,
 } from "./codex-config.js";
+import {
+  inspectCodexGuard,
+  installCodexGuard,
+  uninstallCodexGuard,
+} from "./codex-guard.js";
 import { Ledger } from "./ledger.js";
 import type { ValidationReport } from "./model.js";
 import {
@@ -28,13 +33,18 @@ import {
   installOpenCodeConfig,
   uninstallOpenCodeConfig,
 } from "./opencode-config.js";
+import {
+  inspectOpenCodeGuard,
+  installOpenCodeGuard,
+  uninstallOpenCodeGuard,
+} from "./opencode-guard.js";
 import { startProxy } from "./proxy.js";
 import { RewindService } from "./rewind-service.js";
 import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.7.0\n");
+    process.stdout.write("agent-rewind 0.8.0\n");
     return;
   }
   if (process.argv[2] === "report") {
@@ -55,6 +65,10 @@ async function main(): Promise<void> {
   }
   if (process.argv[2] === "uninstall") {
     await uninstallClient(process.argv[3], process.argv.slice(4));
+    return;
+  }
+  if (process.argv[2] === "guard" || process.argv[2] === "unguard") {
+    await updateGuard(process.argv[2], process.argv[3], process.argv.slice(4));
     return;
   }
   const parsed = parseArguments(process.argv.slice(2));
@@ -96,7 +110,7 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
       }
     } else if (args[index] === "--help" || args[index] === "-h") {
       process.stderr.write(
-        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config <claude|opencode|codex> <allowed-directory> [...]\n       agent-rewind install <claude|opencode|codex> [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall <claude|opencode|codex> [--dry-run]\n       agent-rewind --version\n",
+        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config <claude|opencode|codex> <allowed-directory> [...]\n       agent-rewind install <claude|opencode|codex> [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall <claude|opencode|codex> [--dry-run]\n       agent-rewind guard <opencode|codex> [--dry-run]\n       agent-rewind unguard <opencode|codex> [--dry-run]\n       agent-rewind --version\n",
       );
       process.exit(0);
     } else {
@@ -186,6 +200,41 @@ function isClient(value: string | undefined): value is ClientName {
 
 function clientLabel(client: ClientName): string {
   return client === "claude" ? "Claude Desktop" : client === "opencode" ? "OpenCode" : "Codex";
+}
+
+async function updateGuard(
+  action: "guard" | "unguard",
+  client: string | undefined,
+  args: string[],
+): Promise<void> {
+  if (client !== "opencode" && client !== "codex") {
+    throw new Error(`${action} requires opencode or codex`);
+  }
+  const { dryRun, values } = parseDryRun(args);
+  if (values.length > 0) throw new Error(`${action} ${client} accepts only --dry-run`);
+  const result =
+    action === "guard"
+      ? client === "opencode"
+        ? await installOpenCodeGuard({ dryRun })
+        : await installCodexGuard({ dryRun })
+      : client === "opencode"
+        ? await uninstallOpenCodeGuard({ dryRun })
+        : await uninstallCodexGuard({ dryRun });
+  if (dryRun) {
+    process.stdout.write(`${JSON.stringify(result.preview, null, 2)}\n`);
+    return;
+  }
+  if (!result.changed) {
+    process.stdout.write(`${clientLabel(client)} guard is already ${action === "guard" ? "installed" : "absent"}.\n`);
+    return;
+  }
+  process.stdout.write(
+    `${action === "guard" ? "Installed" : "Removed"} ${clientLabel(client)} guard:\n${result.files.map((file) => `  ${file}`).join("\n")}\n`,
+  );
+  if (action === "guard" && client === "codex") {
+    process.stdout.write("Open /hooks in Codex and trust the Agent Rewind hook before using it.\n");
+  }
+  process.stdout.write(`Restart ${clientLabel(client)} to apply the change.\n`);
 }
 
 function parseDryRun(args: string[]): { dryRun: boolean; values: string[] } {
@@ -314,6 +363,20 @@ async function doctor(args: string[]): Promise<void> {
           ? `not configured in ${openCodeFilename}`
           : `invalid configuration at ${openCodeFilename}`,
   });
+  if (openCodeState === "configured") {
+    const guard = await inspectOpenCodeGuard();
+    checks.push({
+      name: "OpenCode guard",
+      ok: guard !== "conflict",
+      warning: guard === "missing",
+      detail:
+        guard === "configured"
+          ? "blocks built-in edit/write/apply_patch"
+          : guard === "missing"
+            ? "not installed; built-in edits can bypass Agent Rewind"
+            : "managed plugin path contains unexpected content",
+    });
+  }
 
   const codexFilename = defaultCodexConfigPath();
   const codexState = await inspectCodexConfig();
@@ -330,11 +393,25 @@ async function doctor(args: string[]): Promise<void> {
             ? "CLI not found"
             : `could not inspect configuration at ${codexFilename}`,
   });
+  if (codexState === "configured") {
+    const guard = await inspectCodexGuard();
+    checks.push({
+      name: "Codex guard",
+      ok: guard !== "conflict",
+      warning: guard === "missing",
+      detail:
+        guard === "configured"
+          ? "blocks built-in apply_patch after hook trust"
+          : guard === "missing"
+            ? "not installed; built-in apply_patch can bypass Agent Rewind"
+            : "hook configuration or script does not match Agent Rewind",
+    });
+  }
   checks.push({
     name: "Client bypass boundary",
     ok: true,
     warning: true,
-    detail: "Codex/OpenCode built-in edit and shell tools are outside this MCP proxy",
+    detail: "guard mode covers direct edit tools; shell writes remain outside this MCP proxy",
   });
 
   process.stdout.write(

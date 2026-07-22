@@ -73,6 +73,22 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind config cod
 
 重启对应客户端。不要同时为同一目录配置未包装的 Filesystem MCP Server，否则 Agent 可以绕过 Agent Rewind。
 
+### 可选 Guard 模式
+
+OpenCode 和 Codex 自带编辑工具，默认不会经过 MCP。Guard 模式会在客户端侧阻断这些直接编辑，并提示 Agent 改用 `filesystem-with-rewind`：
+
+```bash
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard opencode --dry-run
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard opencode
+
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard codex --dry-run
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard codex
+```
+
+OpenCode guard 阻断内置 `edit`、`write` 和 `apply_patch`。Codex guard 使用官方 `PreToolUse` hook 阻断 `apply_patch`；安装后必须在 Codex 的 `/hooks` 中审查并信任。两者都无法可靠识别所有 shell 写文件命令，因此 guard 不是完整沙箱。
+
+移除命令为 `agent-rewind unguard opencode` 和 `agent-rewind unguard codex`。安装器只删除内容完全匹配的 Agent Rewind 插件或 hook，检测到人工修改时会停止。详细覆盖矩阵和验证步骤见 [Guard mode](docs/GUARD_MODE.md)。
+
 需要移除时，只删除 Agent Rewind 自己的条目并保留其他配置：
 
 ```bash
@@ -104,8 +120,8 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 ### 安全边界
 
 - 只有经过这个 MCP Server 的操作才可见，Claude、OpenCode、Codex 或其他客户端的内置文件工具不在覆盖范围内。
-- OpenCode 可以通过 `permission.edit = "deny"` 禁用内置 `edit`、`write` 和 `apply_patch`，但 shell 命令仍可能写文件；安装器不会擅自修改全局权限。
-- Codex 的 MCP 配置不会接管内置 `apply_patch`、shell 或其他文件操作。Codex 适配提供的是可选择的 Rewind 工具通道，不是透明强制拦截。
+- 可选 OpenCode guard 会阻断内置 `edit`、`write` 和 `apply_patch`；可选 Codex guard 会阻断 `apply_patch`。guard 不会自动安装，也不会修改 OpenCode 全局 permission。
+- shell 命令、第三方插件和绕过平台标准 hook 的工具仍可能直接写文件。Guard 模式是路由约束，不是操作系统级强制边界。
 - 本地 API 使用随机能力令牌和 Origin 校验，审批默认在两分钟后失效。
 - 符号链接和特殊文件会被快照层拒绝。
 - 单文件快照默认上限为 16 MiB，总存储上限为 1 GiB，记录默认保留 7 天。
@@ -124,7 +140,7 @@ node dist/cli.js /绝对路径/允许访问的目录
 
 ### 当前范围
 
-已支持 `write_file`、`edit_file`、`create_directory` 和 `move_file`。只读工具会原样转发。客户端配置格式参考 [OpenCode MCP 文档](https://opencode.ai/docs/mcp-servers/) 和 [Codex MCP 文档](https://learn.chatgpt.com/docs/extend/mcp#configure-with-configtoml)。
+已支持 `write_file`、`edit_file`、`create_directory` 和 `move_file`。只读工具会原样转发。客户端能力依据 [OpenCode MCP](https://opencode.ai/docs/mcp-servers/)、[OpenCode plugins](https://opencode.ai/docs/plugins/)、[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp#configure-with-configtoml) 和 [Codex hooks](https://learn.chatgpt.com/docs/hooks) 文档实现。
 
 ## English
 
@@ -141,6 +157,7 @@ Key properties:
 - safe Claude Desktop install/uninstall with dry-run, backup, and atomic replacement.
 - local-only, privacy-minimized validation metrics via `agent-rewind report`.
 - safe client configuration for Claude Desktop, OpenCode JSONC, and Codex `config.toml` via the official Codex CLI.
+- optional, reversible OpenCode and Codex guards that route direct edit tools toward Agent Rewind MCP.
 
 Run the diagnostic, inspect the dry-run, then install:
 
@@ -150,9 +167,11 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install cl
 npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install claude /absolute/allowed/directory
 npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install opencode /absolute/allowed/directory
 npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install codex /absolute/allowed/directory
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard opencode
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard codex
 ```
 
-These integrations expose the guarded MCP tools but cannot intercept a client's built-in edit or shell tools. See the Chinese section above for configuration details and safety boundaries.
+Guard mode blocks OpenCode's direct edit tools and Codex `apply_patch`, but shell writes remain outside the proxy. See the Chinese section and [guard-mode documentation](docs/GUARD_MODE.md) for exact boundaries.
 
 ## Development
 
