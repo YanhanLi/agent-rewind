@@ -12,7 +12,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.4.0\n");
+    process.stdout.write("agent-rewind 0.4.1\n");
     return;
   }
   if (process.argv[2] === "doctor") {
@@ -83,8 +83,15 @@ function printClaudeConfig(args: string[]): void {
       {
         mcpServers: {
           "filesystem-with-rewind": {
-            command: "npx",
-            args: ["--yes", "github:YanhanLi/agent-rewind", ...roots],
+            command: "npm",
+            args: [
+              "exec",
+              "--yes",
+              "--package=github:YanhanLi/agent-rewind",
+              "--",
+              "agent-rewind",
+              ...roots,
+            ],
           },
         },
       },

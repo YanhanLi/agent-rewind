@@ -7,7 +7,7 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.4.0");
+    expect(output.trim()).toBe("agent-rewind 0.4.1");
   });
 
   it("generates a Claude Desktop configuration", () => {
@@ -21,8 +21,15 @@ describe("CLI", () => {
       mcpServers: { "filesystem-with-rewind": { command: string; args: string[] } };
     };
     expect(config.mcpServers["filesystem-with-rewind"]).toEqual({
-      command: "npx",
-      args: ["--yes", "github:YanhanLi/agent-rewind", root],
+      command: "npm",
+      args: [
+        "exec",
+        "--yes",
+        "--package=github:YanhanLi/agent-rewind",
+        "--",
+        "agent-rewind",
+        root,
+      ],
     });
   });
 });
