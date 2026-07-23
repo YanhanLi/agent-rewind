@@ -24,6 +24,7 @@ import {
   installCodexGuard,
   uninstallCodexGuard,
 } from "./codex-guard.js";
+import { runDemo } from "./demo.js";
 import { Ledger } from "./ledger.js";
 import type { ValidationReport } from "./model.js";
 import {
@@ -44,11 +45,15 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.11.0\n");
+    process.stdout.write("agent-rewind 0.12.0\n");
     return;
   }
   if (process.argv[2] === "report") {
     await report(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === "demo") {
+    await runDemo(process.argv.slice(3));
     return;
   }
   if (process.argv[2] === "doctor") {
@@ -110,7 +115,7 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
       }
     } else if (args[index] === "--help" || args[index] === "-h") {
       process.stderr.write(
-        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config <claude|opencode|codex> <allowed-directory> [...]\n       agent-rewind install <claude|opencode|codex> [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall <claude|opencode|codex> [--dry-run]\n       agent-rewind guard <opencode|codex> [--dry-run]\n       agent-rewind unguard <opencode|codex> [--dry-run]\n       agent-rewind --version\n",
+        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind demo [--auto]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config <claude|opencode|codex> <allowed-directory> [...]\n       agent-rewind install <claude|opencode|codex> [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall <claude|opencode|codex> [--dry-run]\n       agent-rewind guard <opencode|codex> [--dry-run]\n       agent-rewind unguard <opencode|codex> [--dry-run]\n       agent-rewind --version\n",
       );
       process.exit(0);
     } else {

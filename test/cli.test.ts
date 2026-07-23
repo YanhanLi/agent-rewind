@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.11.0");
+    expect(output.trim()).toBe("agent-rewind 0.12.0");
   });
 
   it("prints an empty local validation report as JSON", async () => {
@@ -36,6 +36,19 @@ describe("CLI", () => {
     expect(report.approvals.requested).toBe(0);
     expect(report.changes.actions).toBe(0);
   });
+
+  it("runs the isolated demo through approval, mutation, and undo", async () => {
+    const output = execFileSync(
+      process.execPath,
+      [path.resolve("dist/cli.js"), "demo", "--auto"],
+      { encoding: "utf8", timeout: 15_000 },
+    );
+    const workspace = output.match(/^Demo workspace: (.+)$/m)?.[1];
+
+    expect(output).toContain("Demo verification passed");
+    expect(workspace).toBeDefined();
+    await expect(lstat(workspace!)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 20_000);
 
   it("generates a Claude Desktop configuration", () => {
     const root = path.resolve("test-workspace");

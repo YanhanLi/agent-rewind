@@ -65,6 +65,7 @@ export class ApprovalServer {
     const now = Date.now();
     if (
       this.platform === "darwin" &&
+      process.env.AGENT_REWIND_NO_BROWSER !== "1" &&
       now - this.lastHeartbeat > 3_000 &&
       now - this.lastBrowserOpen > 3_000
     ) {
