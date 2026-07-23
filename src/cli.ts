@@ -46,7 +46,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.25.0\n");
+    process.stdout.write("agent-rewind 0.26.0\n");
     return;
   }
   if (process.argv[2] === "report") {

@@ -811,20 +811,73 @@ describe("Ledger compatibility", () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-ledger-"));
     temporaryDirectories.push(directory);
     const filename = path.join(directory, "ledger.sqlite");
-    const ledger = new Ledger(filename);
     const legacy = change("write_file", []);
     const { changeSetId: _changeSetId, ...payload } = legacy;
     const database = new DatabaseSync(filename);
+    database.exec(`
+      CREATE TABLE changes (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT NOT NULL
+      )
+    `);
     database
       .prepare("INSERT INTO changes (id, created_at, status, payload) VALUES (?, ?, ?, ?)")
       .run(legacy.id, legacy.createdAt, legacy.status, JSON.stringify(payload));
     database.close();
+    const ledger = new Ledger(filename);
 
     const sets = ledger.listChangeSets();
+    const migrated = new DatabaseSync(filename);
+    const columns = migrated.prepare("PRAGMA table_info(changes)").all() as Array<{
+      name: string;
+    }>;
+    const row = migrated
+      .prepare("SELECT change_set_id FROM changes WHERE id = ?")
+      .get(legacy.id) as { change_set_id: string };
+    const indexes = migrated.prepare("PRAGMA index_list(changes)").all() as Array<{
+      name: string;
+    }>;
+    const queryPlan = migrated
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT payload FROM changes
+         WHERE change_set_id = ?
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(legacy.id) as Array<{ detail: string }>;
+    migrated.close();
 
     expect(sets).toHaveLength(1);
     expect(sets[0].id).toBe(legacy.id);
     expect(sets[0].actionCount).toBe(1);
+    expect(columns.map((column) => column.name)).toContain("change_set_id");
+    expect(row.change_set_id).toBe(legacy.id);
+    expect(indexes.map((index) => index.name)).toContain("changes_change_set_created_at");
+    expect(queryPlan.some(({ detail }) => detail.includes("changes_change_set_created_at"))).toBe(
+      true,
+    );
+  });
+
+  it("returns every action in a change set larger than the old history cap", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-large-set-"));
+    temporaryDirectories.push(directory);
+    const ledger = new Ledger(path.join(directory, "ledger.sqlite"));
+    const changeSetId = randomUUID();
+    const start = Date.now() - 1_000;
+    for (let index = 0; index < 501; index += 1) {
+      const record = change("write_file", [], changeSetId);
+      record.createdAt = new Date(start + index).toISOString();
+      ledger.add(record);
+    }
+
+    const sets = ledger.listChangeSets();
+
+    expect(sets).toHaveLength(1);
+    expect(sets[0].id).toBe(changeSetId);
+    expect(sets[0].actionCount).toBe(501);
+    expect(sets[0].changes).toHaveLength(501);
   });
 
   it("aggregates validation events without path or content columns", async () => {

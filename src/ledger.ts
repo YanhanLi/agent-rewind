@@ -20,6 +20,7 @@ export class Ledger {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS changes (
         id TEXT PRIMARY KEY,
+        change_set_id TEXT,
         created_at TEXT NOT NULL,
         status TEXT NOT NULL,
         payload TEXT NOT NULL
@@ -38,12 +39,15 @@ export class Ledger {
       );
       CREATE INDEX IF NOT EXISTS events_created_at ON events (created_at)
     `);
+    this.migrateChangeSetIds();
   }
 
   add(record: ChangeRecord): void {
     this.database
-      .prepare("INSERT INTO changes (id, created_at, status, payload) VALUES (?, ?, ?, ?)")
-      .run(record.id, record.createdAt, record.status, JSON.stringify(record));
+      .prepare(
+        "INSERT INTO changes (id, change_set_id, created_at, status, payload) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(record.id, record.changeSetId, record.createdAt, record.status, JSON.stringify(record));
   }
 
   beginIntent(intent: ChangeIntent): void {
@@ -71,8 +75,10 @@ export class Ledger {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database
-        .prepare("INSERT INTO changes (id, created_at, status, payload) VALUES (?, ?, ?, ?)")
-        .run(record.id, record.createdAt, record.status, JSON.stringify(record));
+        .prepare(
+          "INSERT INTO changes (id, change_set_id, created_at, status, payload) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(record.id, record.changeSetId, record.createdAt, record.status, JSON.stringify(record));
       this.database.prepare("DELETE FROM intents WHERE id = ?").run(intentId);
       this.database.exec("COMMIT");
     } catch (error) {
@@ -83,8 +89,8 @@ export class Ledger {
 
   update(record: ChangeRecord): void {
     this.database
-      .prepare("UPDATE changes SET status = ?, payload = ? WHERE id = ?")
-      .run(record.status, JSON.stringify(record), record.id);
+      .prepare("UPDATE changes SET change_set_id = ?, status = ?, payload = ? WHERE id = ?")
+      .run(record.changeSetId, record.status, JSON.stringify(record), record.id);
   }
 
   recordEvent(event: LocalEvent): void {
@@ -164,7 +170,14 @@ export class Ledger {
   }
 
   listByChangeSet(changeSetId: string): ChangeRecord[] {
-    return this.allRecords().filter((record) => record.changeSetId === changeSetId);
+    const rows = this.database
+      .prepare(
+        `SELECT payload FROM changes
+         WHERE change_set_id = ?
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(changeSetId) as Array<{ payload: string }>;
+    return rows.map((row) => parseRecord(row.payload));
   }
 
   markRecoveryReviewed(changeSetId: string, reviewedAt: string): ChangeSetView {
@@ -193,16 +206,16 @@ export class Ledger {
   }
 
   listChangeSets(limit = 20): ChangeSetView[] {
-    const groups = new Map<string, ChangeRecord[]>();
-    for (const record of this.list(500)) {
-      const group = groups.get(record.changeSetId) ?? [];
-      group.push(record);
-      groups.set(record.changeSetId, group);
-    }
-    return [...groups.entries()]
-      .map(([id, changes]) => toChangeSet(id, changes))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, limit);
+    const rows = this.database
+      .prepare(
+        `SELECT change_set_id
+         FROM changes
+         GROUP BY change_set_id
+         ORDER BY MAX(created_at) DESC, MAX(rowid) DESC
+         LIMIT ?`,
+      )
+      .all(limit) as Array<{ change_set_id: string }>;
+    return rows.map(({ change_set_id: id }) => toChangeSet(id, this.listByChangeSet(id)));
   }
 
   pruneBefore(cutoff: Date): number {
@@ -241,6 +254,29 @@ export class Ledger {
       .prepare("SELECT payload FROM changes ORDER BY created_at ASC, rowid ASC")
       .all() as Array<{ payload: string }>;
     return rows.map((row) => parseRecord(row.payload));
+  }
+
+  private migrateChangeSetIds(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = this.database.prepare("PRAGMA table_info(changes)").all() as Array<{
+        name: string;
+      }>;
+      if (!columns.some((column) => column.name === "change_set_id")) {
+        this.database.exec("ALTER TABLE changes ADD COLUMN change_set_id TEXT");
+      }
+      this.database.exec(`
+        UPDATE changes
+        SET change_set_id = COALESCE(json_extract(payload, '$.changeSetId'), id)
+        WHERE change_set_id IS NULL;
+        CREATE INDEX IF NOT EXISTS changes_change_set_created_at
+        ON changes (change_set_id, created_at)
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 }
 
