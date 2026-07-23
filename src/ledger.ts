@@ -6,6 +6,7 @@ import type {
   LocalEvent,
   LocalEventType,
   ValidationReport,
+  EntryState,
 } from "./model.js";
 
 export class Ledger {
@@ -153,8 +154,8 @@ export class Ledger {
     for (const row of rows) {
       const record = parseRecord(row.payload);
       for (const change of record.paths) {
-        if (change.before.kind === "file") blobs.add(change.before.blob);
-        if (change.after.kind === "file") blobs.add(change.after.blob);
+        addEntryBlobs(change.before, blobs);
+        addEntryBlobs(change.after, blobs);
       }
     }
     return blobs;
@@ -165,6 +166,16 @@ export class Ledger {
       .prepare("SELECT payload FROM changes ORDER BY created_at ASC")
       .all() as Array<{ payload: string }>;
     return rows.map((row) => parseRecord(row.payload));
+  }
+}
+
+function addEntryBlobs(state: EntryState, blobs: Set<string>): void {
+  if (state.kind === "file") {
+    blobs.add(state.blob);
+    return;
+  }
+  if (state.kind === "directory" && state.children) {
+    for (const child of Object.values(state.children)) addEntryBlobs(child, blobs);
   }
 }
 

@@ -18,12 +18,14 @@ import type { Ledger } from "./ledger.js";
 import type { SnapshotStore } from "./snapshot-store.js";
 
 const DELETE_FILE = "rewind_delete_file";
+const DELETE_DIRECTORY = "rewind_delete_directory";
 const MUTATING_TOOLS = new Set([
   "write_file",
   "edit_file",
   "create_directory",
   "move_file",
   DELETE_FILE,
+  DELETE_DIRECTORY,
 ]);
 const BEGIN_CHANGE_SET = "rewind_begin_change_set";
 const END_CHANGE_SET = "rewind_end_change_set";
@@ -37,7 +39,7 @@ interface ProxyOptions {
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.10.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.11.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const require = createRequire(import.meta.url);
   const filesystemPackage = require.resolve("@modelcontextprotocol/server-filesystem/package.json");
@@ -50,7 +52,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.10.0" },
+    { name: "agent-rewind", version: "0.11.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -75,6 +77,24 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
             type: "object" as const,
             properties: {
               path: { type: "string", minLength: 1, description: "Absolute path to the file." },
+            },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        },
+        {
+          name: DELETE_DIRECTORY,
+          description:
+            "Recursively delete one directory through Agent Rewind. Its files and empty directories are snapshotted, previewed, and require local approval. Configured root directories cannot be deleted.",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              path: {
+                type: "string",
+                minLength: 1,
+                description: "Absolute path to the directory.",
+              },
             },
             required: ["path"],
             additionalProperties: false,
@@ -142,6 +162,18 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
             : `Cannot delete a missing file: ${targets[0]}`,
         );
       }
+      if (name === DELETE_DIRECTORY) {
+        if (options.roots.some((root) => path.resolve(root) === targets[0])) {
+          throw new Error("Refusing to delete a configured root directory");
+        }
+        if (before[0].kind !== "directory") {
+          throw new Error(
+            before[0].kind === "file"
+              ? "rewind_delete_directory only deletes directories"
+              : `Cannot delete a missing directory: ${targets[0]}`,
+          );
+        }
+      }
       const detail = await preview(name, arguments_, before, upstream);
       const summary = summarize(name, targets, before, arguments_);
       const explicitChangeSet = changeSets.explicit();
@@ -168,8 +200,8 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
       }
 
       const result =
-        name === DELETE_FILE
-          ? await deleteFile(targets[0])
+        name === DELETE_FILE || name === DELETE_DIRECTORY
+          ? await deleteTarget(name, targets[0])
           : ((await upstream.callTool(request.params)) as CallToolResult);
       if (result.isError) return result;
       const after = await Promise.all(targets.map((target) => options.snapshots.capture(target)));
@@ -338,6 +370,14 @@ async function preview(
   if (name === DELETE_FILE) {
     return `Delete file:\n${String(args.path)}\n\nThe captured snapshot can be restored unless the path is recreated before undo.`;
   }
+  if (name === DELETE_DIRECTORY) {
+    const stats = directoryStats(before[0]);
+    const topLevel =
+      before[0].kind === "directory" && before[0].children
+        ? Object.keys(before[0].children).slice(0, 20)
+        : [];
+    return `Delete directory recursively:\n${String(args.path)}\n\nContains ${stats.files} file${stats.files === 1 ? "" : "s"} and ${stats.directories} subdirector${stats.directories === 1 ? "y" : "ies"}.\nTop-level entries:\n${topLevel.map((name) => `- ${name}`).join("\n") || "(empty)"}`;
+  }
   return `Create directory, including missing parents:\n${String(args.path)}`;
 }
 
@@ -356,11 +396,12 @@ function summarize(
   }
   if (name === "move_file") return `Move ${targets[0]} to ${targets[1]}`;
   if (name === DELETE_FILE) return `Delete ${targets[0]}`;
+  if (name === DELETE_DIRECTORY) return `Delete directory ${targets[0]}`;
   return `Create directory ${targets[0]}`;
 }
 
-async function deleteFile(target: string): Promise<CallToolResult> {
-  await rm(target);
+async function deleteTarget(name: string, target: string): Promise<CallToolResult> {
+  await rm(target, { recursive: name === DELETE_DIRECTORY });
   return success(`Deleted ${target}. Agent Rewind recorded a restorable snapshot.`);
 }
 
@@ -382,12 +423,35 @@ function commonParent(targets: string[]): string {
 
 function withImpact(detail: string, before: EntryState[]): string {
   const snapshotBytes = before.reduce(
-    (total, state) => total + (state.kind === "file" ? state.size : 0),
+    (total, state) => total + entryBytes(state),
     0,
   );
   const limit = 100_000;
   const preview = detail.length > limit ? `${detail.slice(0, limit)}\n\n[Preview truncated]` : detail;
   return `Affected paths: ${before.length}\nSnapshot size: ${formatBytes(snapshotBytes)}\n\n${preview}`;
+}
+
+function entryBytes(state: EntryState): number {
+  if (state.kind === "file") return state.size;
+  if (state.kind !== "directory" || !state.children) return 0;
+  return Object.values(state.children).reduce((total, child) => total + entryBytes(child), 0);
+}
+
+function directoryStats(state: EntryState): { files: number; directories: number } {
+  if (state.kind !== "directory" || !state.children) return { files: 0, directories: 0 };
+  return Object.values(state.children).reduce(
+    (total, child) => {
+      if (child.kind === "file") total.files += 1;
+      if (child.kind === "directory") {
+        total.directories += 1;
+        const nested = directoryStats(child);
+        total.files += nested.files;
+        total.directories += nested.directories;
+      }
+      return total;
+    },
+    { files: 0, directories: 0 },
+  );
 }
 
 function formatBytes(bytes: number): string {

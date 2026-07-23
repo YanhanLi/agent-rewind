@@ -1,6 +1,7 @@
 import { createServer } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalServer } from "./approval-server.js";
+import type { ChangeRecord } from "./model.js";
 import type { RewindService } from "./rewind-service.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -169,6 +170,69 @@ describe("ApprovalServer", () => {
       { type: "approval_requested", tool: "write_file" },
       { type: "approval_rejected", tool: "write_file" },
     ]);
+  });
+
+  it("omits snapshot manifests from the history API", async () => {
+    const previousToken = process.env.AGENT_REWIND_TOKEN;
+    process.env.AGENT_REWIND_TOKEN = "public-history-test-token";
+    const record: ChangeRecord = {
+      id: "change-1",
+      changeSetId: "set-1",
+      tool: "rewind_delete_directory",
+      summary: "Delete directory /tmp/archive",
+      createdAt: new Date().toISOString(),
+      status: "applied",
+      paths: [
+        {
+          path: "/tmp/archive",
+          before: {
+            kind: "directory",
+            hash: "directory-secret-hash",
+            entries: ["private.txt:file:file-secret-hash"],
+            children: {
+              "private.txt": {
+                kind: "file",
+                hash: "file-secret-hash",
+                blob: "blob-secret-hash",
+                size: 10,
+              },
+            },
+          },
+          after: { kind: "missing", hash: "missing-secret-hash" },
+        },
+      ],
+    };
+    const rewind = {
+      list: () => [record],
+      listChangeSets: () => [
+        {
+          id: "set-1",
+          createdAt: record.createdAt,
+          updatedAt: record.createdAt,
+          status: "applied",
+          actionCount: 1,
+          affectedPaths: ["/tmp/archive"],
+          changes: [record],
+        },
+      ],
+      recordEvent: () => undefined,
+    } as unknown as RewindService;
+    const approval = new ApprovalServer(rewind, 32_240, 120_000, () => undefined, "linux");
+    await approval.start();
+    cleanup.push(async () => {
+      await approval.stop();
+      if (previousToken === undefined) delete process.env.AGENT_REWIND_TOKEN;
+      else process.env.AGENT_REWIND_TOKEN = previousToken;
+    });
+
+    const response = await fetch(`http://127.0.0.1:${approval.port}/api/state`, {
+      headers: { "X-Agent-Rewind-Token": "public-history-test-token" },
+    });
+    const body = await response.text();
+
+    expect(body).toContain("/tmp/archive");
+    expect(body).not.toContain("private.txt");
+    expect(body).not.toContain("secret-hash");
   });
 });
 

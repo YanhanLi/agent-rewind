@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { PendingApproval } from "./model.js";
+import type { ChangeRecord, ChangeSetView, PendingApproval } from "./model.js";
 import type { RewindService } from "./rewind-service.js";
 
 interface Waiter {
@@ -134,8 +134,8 @@ export class ApprovalServer {
         response.end(
           JSON.stringify({
             pending: [...this.pending.values()].map(({ request: item }) => item),
-            changes: this.rewind.list(),
-            changeSets: this.rewind.listChangeSets(),
+            changes: this.rewind.list().map(publicChange),
+            changeSets: this.rewind.listChangeSets().map(publicChangeSet),
           }),
         );
         return;
@@ -201,6 +201,32 @@ export class ApprovalServer {
     response.statusCode = 403;
     response.end(JSON.stringify({ error: "Forbidden" }));
   }
+}
+
+function publicChange(record: ChangeRecord) {
+  return {
+    id: record.id,
+    changeSetId: record.changeSetId,
+    changeSetLabel: record.changeSetLabel,
+    tool: record.tool,
+    summary: record.summary,
+    createdAt: record.createdAt,
+    status: record.status,
+    paths: record.paths.map((change) => change.path),
+  };
+}
+
+function publicChangeSet(changeSet: ChangeSetView) {
+  return {
+    id: changeSet.id,
+    label: changeSet.label,
+    createdAt: changeSet.createdAt,
+    updatedAt: changeSet.updatedAt,
+    status: changeSet.status,
+    actionCount: changeSet.actionCount,
+    affectedPaths: changeSet.affectedPaths,
+    changes: changeSet.changes.map(publicChange),
+  };
 }
 
 function matchesRule(

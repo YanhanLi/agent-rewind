@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -89,6 +89,48 @@ describe("RewindService", () => {
       "Refusing to overwrite",
     );
     expect(await readFile(conflictedTarget, "utf8")).toBe("user recreated this\n");
+  });
+
+  it("restores a deleted directory manifest and protects a recreated path", async () => {
+    const first = await fixture();
+    const restoredTarget = path.join(first.directory, "deleted-directory");
+    await mkdir(path.join(restoredTarget, "nested"), { recursive: true });
+    await mkdir(path.join(restoredTarget, "empty"));
+    await writeFile(path.join(restoredTarget, "root.txt"), "root content\n");
+    await writeFile(path.join(restoredTarget, "nested", "child.txt"), "child content\n");
+    const restoredBefore = await first.snapshots.capture(restoredTarget);
+    await rm(restoredTarget, { recursive: true });
+    const restoredAfter = await first.snapshots.capture(restoredTarget);
+    const restoredRecord = change("rewind_delete_directory", [
+      { path: restoredTarget, before: restoredBefore, after: restoredAfter },
+    ]);
+    first.ledger.add(restoredRecord);
+    expect(await first.snapshots.garbageCollect(first.ledger.referencedBlobs())).toBe(0);
+
+    await first.rewind.undo(restoredRecord.id);
+    expect(await readFile(path.join(restoredTarget, "root.txt"), "utf8")).toBe("root content\n");
+    expect(await readFile(path.join(restoredTarget, "nested", "child.txt"), "utf8")).toBe(
+      "child content\n",
+    );
+    expect((await lstat(path.join(restoredTarget, "empty"))).isDirectory()).toBe(true);
+
+    const second = await fixture();
+    const conflictedTarget = path.join(second.directory, "deleted-directory");
+    await mkdir(conflictedTarget);
+    await writeFile(path.join(conflictedTarget, "agent.txt"), "agent file\n");
+    const conflictedBefore = await second.snapshots.capture(conflictedTarget);
+    await rm(conflictedTarget, { recursive: true });
+    const conflictedAfter = await second.snapshots.capture(conflictedTarget);
+    const conflictedRecord = change("rewind_delete_directory", [
+      { path: conflictedTarget, before: conflictedBefore, after: conflictedAfter },
+    ]);
+    second.ledger.add(conflictedRecord);
+    await writeFile(conflictedTarget, "user replacement\n");
+
+    await expect(second.rewind.undo(conflictedRecord.id)).rejects.toThrow(
+      "Refusing to overwrite",
+    );
+    expect(await readFile(conflictedTarget, "utf8")).toBe("user replacement\n");
   });
 
   it("moves a directory back when its state is unchanged", async () => {

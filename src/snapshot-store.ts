@@ -85,12 +85,14 @@ export class SnapshotStore {
     if (info.isDirectory()) {
       const names = (await readdir(target)).sort();
       const children: string[] = [];
+      const manifest: Record<string, EntryState> = {};
       for (const name of names) {
         const child = await this.capture(path.join(target, name));
         children.push(`${name}:${child.kind}:${child.hash}`);
+        manifest[name] = child;
       }
       const hash = createHash("sha256").update(children.join("\n")).digest("hex");
-      return { kind: "directory", hash, entries: children };
+      return { kind: "directory", hash, entries: children, children: manifest };
     }
 
     throw new Error(`Unsupported filesystem entry: ${target}`);
@@ -110,10 +112,17 @@ export class SnapshotStore {
       return;
     }
 
-    // Directory contents are moved back by the move-specific inverse. Generic
-    // restoration only removes a newly created empty directory safely.
     if (change.after.kind === "missing") {
-      throw new Error(`Directory restoration requires a move inverse: ${change.path}`);
+      await this.validateDirectorySnapshot(change.before, change.path);
+      await mkdir(path.dirname(change.path), { recursive: true });
+      try {
+        await mkdir(change.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const current = await this.capture(change.path);
+        throw new RewindConflictError(change.path, change.after.hash, current.hash);
+      }
+      await this.restoreDirectoryContents(change.path, change.before);
     }
   }
 
@@ -141,6 +150,44 @@ export class SnapshotStore {
     }
     await mkdir(path.dirname(source.path), { recursive: true });
     await rename(destination.path, source.path);
+  }
+
+  private async validateDirectorySnapshot(state: EntryState, target: string): Promise<void> {
+    if (state.kind !== "directory" || !state.children) {
+      throw new Error(`Directory snapshot is not restorable: ${target}`);
+    }
+    for (const [name, child] of Object.entries(state.children)) {
+      validateChildName(name, target);
+      if (child.kind === "file") {
+        const blob = await lstat(path.join(this.blobDirectory, child.blob));
+        if (!blob.isFile()) throw new Error(`Snapshot blob is not a file: ${child.blob}`);
+      } else if (child.kind === "directory") {
+        await this.validateDirectorySnapshot(child, path.join(target, name));
+      } else {
+        throw new Error(`Directory snapshot contains a missing child: ${path.join(target, name)}`);
+      }
+    }
+  }
+
+  private async restoreDirectoryContents(target: string, state: EntryState): Promise<void> {
+    if (state.kind !== "directory" || !state.children) {
+      throw new Error(`Directory snapshot is not restorable: ${target}`);
+    }
+    for (const [name, child] of Object.entries(state.children)) {
+      const childTarget = path.join(target, name);
+      if (child.kind === "file") {
+        await writeFile(childTarget, await readFile(path.join(this.blobDirectory, child.blob)));
+      } else if (child.kind === "directory") {
+        await mkdir(childTarget);
+        await this.restoreDirectoryContents(childTarget, child);
+      }
+    }
+  }
+}
+
+function validateChildName(name: string, target: string): void {
+  if (name.length === 0 || name === "." || name === ".." || path.basename(name) !== name) {
+    throw new Error(`Invalid directory snapshot entry at ${target}`);
   }
 }
 

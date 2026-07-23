@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -18,6 +18,10 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
   directories.push(root, data);
   const target = path.join(root, "demo.txt");
   await writeFile(target, "original\n");
+  const directoryTarget = path.join(root, "archive");
+  await mkdir(path.join(directoryTarget, "nested"), { recursive: true });
+  await mkdir(path.join(directoryTarget, "empty"));
+  await writeFile(path.join(directoryTarget, "nested", "note.txt"), "archived note\n");
   const port = 33_000 + Math.floor(Math.random() * 2_000);
   const token = "integration-test-token";
   const transport = new StdioClientTransport({
@@ -40,6 +44,9 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     expect(tools.tools.some((tool) => tool.name === "rewind_begin_change_set")).toBe(true);
     expect(tools.tools.some((tool) => tool.name === "rewind_end_change_set")).toBe(true);
     expect(tools.tools.find((tool) => tool.name === "rewind_delete_file")).toMatchObject({
+      annotations: { destructiveHint: true },
+    });
+    expect(tools.tools.find((tool) => tool.name === "rewind_delete_directory")).toMatchObject({
       annotations: { destructiveHint: true },
     });
     expect((await fetch(`http://127.0.0.1:${port}/api/state`)).status).toBe(403);
@@ -109,11 +116,11 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     });
     expect(await readFile(outsideSet, "utf8")).toBe("keep this\n");
 
-    const deleteDirectory = await client.callTool({
-      name: "rewind_delete_file",
+    const deleteRoot = await client.callTool({
+      name: "rewind_delete_directory",
       arguments: { path: root },
     });
-    expect(deleteDirectory.isError).toBe(true);
+    expect(deleteRoot.isError).toBe(true);
 
     await client.callTool({
       name: "rewind_begin_change_set",
@@ -138,23 +145,49 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     await post(port, token, `/api/change-sets/${deletionSet!.id}/undo`);
     expect(await readFile(target, "utf8")).toBe("original\n");
 
+    await client.callTool({
+      name: "rewind_begin_change_set",
+      arguments: { label: "Directory deletion" },
+    });
+    const directoryDeleteCall = client.callTool({
+      name: "rewind_delete_directory",
+      arguments: { path: directoryTarget },
+    });
+    const directoryApproval = await waitForPending(port, token);
+    expect(directoryApproval.pending[0].summary).toContain("Delete directory");
+    await post(port, token, `/api/approvals/${directoryApproval.pending[0].id}/approve`);
+    const directoryDeleted = await directoryDeleteCall;
+    expect(directoryDeleted.isError).not.toBe(true);
+    await expect(lstat(directoryTarget)).rejects.toMatchObject({ code: "ENOENT" });
+    await client.callTool({ name: "rewind_end_change_set", arguments: {} });
+
+    const afterDirectoryDelete = await stateFor(port, token);
+    const directorySet = afterDirectoryDelete.changeSets.find(
+      (changeSet) => changeSet.label === "Directory deletion",
+    );
+    await post(port, token, `/api/change-sets/${directorySet!.id}/undo`);
+    expect(await readFile(path.join(directoryTarget, "nested", "note.txt"), "utf8")).toBe(
+      "archived note\n",
+    );
+    expect((await lstat(path.join(directoryTarget, "empty"))).isDirectory()).toBe(true);
+
     const report = new Ledger(path.join(data, "ledger.sqlite")).validationReport();
     expect(report.approvals).toMatchObject({
-      requested: 4,
+      requested: 5,
       changeSetApproved: 1,
       sessionApproved: 0,
       autoApproved: 1,
-      approved: 2,
+      approved: 3,
     });
-    expect(report.changes).toMatchObject({ actions: 4, changeSets: 3, undone: 3 });
-    expect(report.undo).toEqual({ attempted: 2, succeeded: 2, conflicts: 0 });
+    expect(report.changes).toMatchObject({ actions: 5, changeSets: 4, undone: 4 });
+    expect(report.undo).toEqual({ attempted: 3, succeeded: 3, conflicts: 0 });
   } finally {
     await transport.close();
   }
 }, 20_000);
 
 interface UiState {
-  pending: Array<{ id: string; changeSetLabel?: string }>;
+  pending: Array<{ id: string; summary: string; changeSetLabel?: string }>;
   changes: Array<{ id: string; summary: string }>;
   changeSets: Array<{ id: string; label?: string; actionCount: number }>;
 }

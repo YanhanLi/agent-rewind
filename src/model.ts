@@ -1,7 +1,7 @@
 export type EntryState =
   | { kind: "missing"; hash: string }
   | { kind: "file"; hash: string; blob: string; size: number }
-  | { kind: "directory"; hash: string; entries: string[] };
+  | { kind: "directory"; hash: string; entries: string[]; children?: Record<string, EntryState> };
 
 export interface PathChange {
   path: string;
