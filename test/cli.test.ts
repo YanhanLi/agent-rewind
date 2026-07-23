@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,12 +15,13 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.24.0");
+    expect(output.trim()).toBe("agent-rewind 0.25.0");
   });
 
   it("prints an empty local validation report as JSON", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-report-"));
     temporaryDirectories.push(directory);
+    await chmod(directory, 0o755);
     const output = execFileSync(
       process.execPath,
       [path.resolve("dist/cli.js"), "report", "--json"],
@@ -33,8 +34,28 @@ describe("CLI", () => {
     };
 
     expect(report.period.firstEventAt).toBeNull();
+    expect((await lstat(directory)).mode & 0o777).toBe(0o700);
     expect(report.approvals.requested).toBe(0);
     expect(report.changes.actions).toBe(0);
+  });
+
+  it("refuses a symlinked data directory without changing its target permissions", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-data-link-"));
+    temporaryDirectories.push(directory);
+    const actual = path.join(directory, "actual");
+    const linked = path.join(directory, "linked");
+    await mkdir(actual);
+    await chmod(actual, 0o755);
+    await symlink(actual, linked);
+
+    expect(() =>
+      execFileSync(process.execPath, [path.resolve("dist/cli.js"), "report", "--json"], {
+        encoding: "utf8",
+        stdio: "pipe",
+        env: { ...process.env, AGENT_REWIND_DATA_DIR: linked },
+      }),
+    ).toThrow();
+    expect((await lstat(actual)).mode & 0o777).toBe(0o755);
   });
 
   it("runs the isolated demo through approval, mutation, and undo", async () => {

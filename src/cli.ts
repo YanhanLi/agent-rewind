@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { constants } from "node:fs";
-import { access, mkdir, realpath } from "node:fs/promises";
+import { access, mkdir, open, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -46,7 +46,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.24.0\n");
+    process.stdout.write("agent-rewind 0.25.0\n");
     return;
   }
   if (process.argv[2] === "report") {
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
   }
   const parsed = parseArguments(process.argv.slice(2));
   const dataDirectory = getDataDirectory();
-  await mkdir(dataDirectory, { recursive: true });
+  await ensurePrivateDirectory(dataDirectory);
   const operationLock = new SqliteOperationLock(path.join(dataDirectory, "operation-lock.sqlite"));
   const snapshots = new SnapshotStore(path.join(dataDirectory, "blobs"), {
     maxFileBytes: megabytesFromEnvironment("AGENT_REWIND_MAX_FILE_MB", 16),
@@ -325,12 +325,27 @@ function getDataDirectory(): string {
     : path.join(os.homedir(), ".agent-rewind");
 }
 
+async function ensurePrivateDirectory(target: string): Promise<void> {
+  await mkdir(target, { recursive: true, mode: 0o700 });
+  const handle = await open(
+    target,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
+  try {
+    const info = await handle.stat();
+    if (!info.isDirectory()) throw new Error(`Data path is not a directory: ${target}`);
+    await handle.chmod(0o700);
+  } finally {
+    await handle.close();
+  }
+}
+
 async function report(args: string[]): Promise<void> {
   if (args.some((value) => value !== "--json")) {
     throw new Error("report accepts only --json");
   }
   const dataDirectory = getDataDirectory();
-  await mkdir(dataDirectory, { recursive: true });
+  await ensurePrivateDirectory(dataDirectory);
   const ledger = new Ledger(path.join(dataDirectory, "ledger.sqlite"));
   const result = ledger.validationReport();
   ledger.close();
@@ -389,7 +404,7 @@ async function doctor(args: string[]): Promise<void> {
 
   const dataDirectory = getDataDirectory();
   try {
-    await mkdir(dataDirectory, { recursive: true });
+    await ensurePrivateDirectory(dataDirectory);
     await access(dataDirectory, constants.R_OK | constants.W_OK);
     checks.push({ name: "Data directory", ok: true, detail: dataDirectory });
   } catch {

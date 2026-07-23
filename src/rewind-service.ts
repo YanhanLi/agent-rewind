@@ -201,7 +201,7 @@ export class RewindService {
     this.ledger.recordEvent({ type: "undo_started", target: "change" });
     const record = this.ledger.get(id);
     if (!record) throw new Error(`Unknown change: ${id}`);
-    if (record.status !== "applied") throw new Error(`Change is already ${record.status}`);
+    if (record.status === "undone") throw new Error("Change is already undone");
 
     try {
       const result = await this.undoRecord(record);
@@ -262,10 +262,6 @@ export class RewindService {
     if (records.every((record) => record.status === "undone")) {
       throw new Error("This change set is already undone");
     }
-    if (records.some((record) => record.status === "conflict")) {
-      throw new Error("A conflicted change set cannot be resumed automatically");
-    }
-
     const initialByPath = new Map<string, PathChange>();
     for (const record of records) {
       for (const change of record.paths) {
@@ -299,7 +295,7 @@ export class RewindService {
       }
     }
     for (const record of records) {
-      if (record.status !== "applied" || record.tool === "move_file") continue;
+      if (record.status === "undone" || record.tool === "move_file") continue;
       await this.verifyRecordSnapshots(record);
     }
     return { records, initialByPath };

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, open, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -20,7 +20,20 @@ export class SnapshotStore {
   ) {}
 
   async initialize(): Promise<void> {
-    await mkdir(this.blobDirectory, { recursive: true });
+    await mkdir(this.blobDirectory, { recursive: true, mode: 0o700 });
+    const handle = await open(
+      this.blobDirectory,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      const info = await handle.stat();
+      if (!info.isDirectory()) {
+        throw new Error(`Snapshot path is not a directory: ${this.blobDirectory}`);
+      }
+      await handle.chmod(0o700);
+    } finally {
+      await handle.close();
+    }
     await this.refreshTotalBlobBytes();
   }
 
@@ -355,10 +368,17 @@ export class SnapshotStore {
   private async ensureBlob(hash: string, content: Buffer): Promise<void> {
     const result = this.blobWriteTail.then(async () => {
       const blob = path.join(this.blobDirectory, hash);
+      const state = { kind: "file" as const, hash, blob: hash, size: content.byteLength };
       try {
         await lstat(blob);
-        const now = new Date();
-        await utimes(blob, now, now);
+        try {
+          await this.readVerifiedBlob(state);
+          const now = new Date();
+          await utimes(blob, now, now);
+        } catch (error) {
+          if (!(error instanceof SnapshotIntegrityError)) throw error;
+          await this.replaceCorruptedBlob(hash, content);
+        }
         return;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -371,13 +391,19 @@ export class SnapshotStore {
         );
       }
       try {
-        await writeFile(blob, content, { flag: "wx" });
+        await writeFile(blob, content, { flag: "wx", mode: 0o600 });
         this.totalBlobBytes += content.byteLength;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const now = new Date();
-        await utimes(blob, now, now);
-        await this.refreshTotalBlobBytes();
+        try {
+          await this.readVerifiedBlob(state);
+          const now = new Date();
+          await utimes(blob, now, now);
+          await this.refreshTotalBlobBytes();
+        } catch (existingError) {
+          if (!(existingError instanceof SnapshotIntegrityError)) throw existingError;
+          await this.replaceCorruptedBlob(hash, content);
+        }
       }
     });
     this.blobWriteTail = result.then(
@@ -385,6 +411,44 @@ export class SnapshotStore {
       () => undefined,
     );
     return result;
+  }
+
+  private async replaceCorruptedBlob(hash: string, content: Buffer): Promise<void> {
+    const blob = path.join(this.blobDirectory, hash);
+    let replacedBytes = 0;
+    try {
+      const existing = await lstat(blob);
+      if (existing.isDirectory()) {
+        throw new SnapshotIntegrityError(
+          `Snapshot blob repair refused to replace a directory: ${hash}`,
+        );
+      }
+      if (existing.isFile()) replacedBytes = existing.size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+
+    await this.refreshTotalBlobBytes();
+    if (this.totalBlobBytes - replacedBytes + content.byteLength > this.limits.maxTotalBytes) {
+      throw new SnapshotStorageError(
+        `Snapshot storage quota exceeded (${formatBytes(this.limits.maxTotalBytes)}).`,
+      );
+    }
+
+    const temporary = path.join(this.blobDirectory, `.${hash}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
+      await rename(temporary, blob);
+    } catch (error) {
+      if (error instanceof SnapshotIntegrityError) throw error;
+      throw new SnapshotIntegrityError(
+        `Snapshot blob could not be repaired safely: ${hash}`,
+        error,
+      );
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    await this.refreshTotalBlobBytes();
   }
 
   private async captureFile(target: string): Promise<EntryState> {

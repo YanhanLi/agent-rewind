@@ -166,7 +166,10 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - 撤销会在写回前重新校验内容寻址 blob 的大小和 SHA-256；文件和被删目录先在目标同级构建暂存内容，再原子提交，校验或写入失败不会留下半恢复目录。
 - 撤销 Agent 新建的文件或目录时，会先把完整目标原子移动到带所有权 marker 的同级隔离目录，再清理内容；强制退出后的重试只回收 marker 与绝对目标均匹配的遗留暂存，不会按名称前缀删除用户目录。
 - 单次撤销和 change set 撤销都可识别“文件已恢复、账本仍显示 applied”的中间态并继续完成；已落账的 change-set action 不会被重复执行。
+- `conflict` 表示最近一次撤销被后续修改阻止，而不是永久终态；路径重新回到记录中的合法 before/after 状态后，可先运行 `Check undo` 再安全重试。
 - change set 会在修改任何路径前顺序校验全部待用快照；冲突与快照完整性失败使用不同的 API 错误码，并在审批页显示不会被定时刷新清掉的操作提示。
+- 已存在的内容寻址 blob 会在去重前重新校验；若之后再次捕获到相同哈希的可信内容，损坏文件或符号链接会被原子替换，异常目录则保留并拒绝自动删除。
+- 数据根和 blob 目录每次初始化都会通过不跟随符号链接的目录句柄收紧为 `0700`，新 blob 使用 `0600`；最终数据路径若是符号链接会被拒绝。
 - MCP stdin 关闭或收到 SIGINT/SIGTERM 时，会先结束待审批请求并等待已获批 mutation 落账，再关闭上游子进程、本地 HTTP 服务和 SQLite。
 - 多个本地客户端共享 `~/.agent-rewind` 时，恢复、mutation 和撤销会跨进程串行；这保证账本一致性，但一个长时间未返回的上游操作也会让其他客户端等待。
 - 单文件快照默认上限为 16 MiB，总存储上限为 1 GiB，记录默认保留 7 天。
@@ -208,6 +211,8 @@ Key properties:
 - bounded change-set snapshot preflight and actionable conflict/integrity feedback in the approval UI;
 - on-demand, timestamped undo-readiness checks, including resumable partial change sets;
 - atomic quarantine for undoing newly created paths, with ownership-verified stale staging cleanup;
+- retryable conflict records and atomic self-repair when trusted content with the same hash is captured again;
+- owner-only data/blob permissions with no-follow validation of final storage directories;
 - crash recovery through persistent pre-mutation intents and startup reconciliation;
 - a dedicated recovery-review queue with explicit keep or undo decisions;
 - bounded snapshot-backed diffs with binary, directory, and large-file summaries;

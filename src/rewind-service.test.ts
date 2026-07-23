@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -201,6 +201,11 @@ describe("RewindService", () => {
     expect(await readFile(target, "utf8")).toBe("user version\n");
     expect(ledger.get(record.id)?.status).toBe("conflict");
     expect(ledger.validationReport().undo).toEqual({ attempted: 1, succeeded: 0, conflicts: 1 });
+
+    await writeFile(target, "agent version\n");
+    await expect(rewind.undo(record.id)).resolves.toMatchObject({ status: "undone" });
+    expect(await readFile(target, "utf8")).toBe("before\n");
+    expect(ledger.validationReport().undo).toEqual({ attempted: 2, succeeded: 1, conflicts: 1 });
   });
 
   it("restores a deleted file and rejects undo after the path is recreated", async () => {
@@ -474,6 +479,27 @@ describe("RewindService", () => {
     expect(await readFile(secondTarget, "utf8")).toBe("second before\n");
   });
 
+  it("retries a conflicted change set after its path returns to an expected state", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "retry-conflicted-set.txt");
+    await writeFile(target, "before\n");
+    const before = await snapshots.capture(target);
+    await writeFile(target, "after\n");
+    const after = await snapshots.capture(target);
+    const record = change("write_file", [{ path: target, before, after }]);
+    record.status = "conflict";
+    ledger.add(record);
+
+    expect(ledger.getChangeSet(record.changeSetId)?.status).toBe("conflict");
+    await expect(rewind.checkUndoReadiness(record.changeSetId)).resolves.toMatchObject({
+      status: "ready",
+    });
+    await expect(rewind.undoChangeSet(record.changeSetId)).resolves.toMatchObject({
+      status: "undone",
+    });
+    expect(await readFile(target, "utf8")).toBe("before\n");
+  });
+
   it("does not overwrite a file with a corrupted snapshot blob", async () => {
     const { directory, snapshots, ledger, rewind } = await fixture();
     const target = path.join(directory, "corrupt-file.txt");
@@ -594,6 +620,33 @@ describe("RewindService", () => {
 });
 
 describe("SnapshotStore limits", () => {
+  it("tightens an existing blob directory to owner-only access", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-private-blobs-"));
+    temporaryDirectories.push(directory);
+    const blobDirectory = path.join(directory, "blobs");
+    await mkdir(blobDirectory);
+    await chmod(blobDirectory, 0o755);
+    const snapshots = new SnapshotStore(blobDirectory);
+
+    await snapshots.initialize();
+
+    expect((await lstat(blobDirectory)).mode & 0o777).toBe(0o700);
+  });
+
+  it("refuses a symlinked blob directory without changing its target permissions", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-private-link-"));
+    temporaryDirectories.push(directory);
+    const actual = path.join(directory, "actual-blobs");
+    const linked = path.join(directory, "linked-blobs");
+    await mkdir(actual);
+    await chmod(actual, 0o755);
+    await symlink(actual, linked);
+    const snapshots = new SnapshotStore(linked);
+
+    await expect(snapshots.initialize()).rejects.toBeDefined();
+    expect((await lstat(actual)).mode & 0o777).toBe(0o755);
+  });
+
   it("rejects oversized files", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-limit-"));
     temporaryDirectories.push(directory);
@@ -669,6 +722,63 @@ describe("SnapshotStore limits", () => {
     await snapshots.capture(target);
 
     expect(await snapshots.garbageCollect(new Set(), 5 * 60 * 1_000)).toBe(0);
+  });
+
+  it("atomically repairs a corrupted blob when the same trusted content is captured again", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-blob-repair-"));
+    temporaryDirectories.push(directory);
+    const snapshots = new SnapshotStore(path.join(directory, "blobs"));
+    await snapshots.initialize();
+    const target = path.join(directory, "source.txt");
+    await writeFile(target, "trusted content\n");
+    const state = await snapshots.capture(target);
+    if (state.kind !== "file") throw new Error("Expected file snapshot");
+    const blob = path.join(directory, "blobs", state.blob);
+    expect((await lstat(blob)).mode & 0o777).toBe(0o600);
+    await writeFile(blob, "corrupt content\n");
+
+    await expect(snapshots.verifySnapshot(state, target)).rejects.toThrow("failed verification");
+    await expect(snapshots.capture(target)).resolves.toEqual(state);
+    await expect(snapshots.verifySnapshot(state, target)).resolves.toBeUndefined();
+    expect(await readFile(blob, "utf8")).toBe("trusted content\n");
+  });
+
+  it("repairs a blob symlink without changing its external target", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-blob-link-"));
+    temporaryDirectories.push(directory);
+    const snapshots = new SnapshotStore(path.join(directory, "blobs"));
+    await snapshots.initialize();
+    const target = path.join(directory, "source.txt");
+    const external = path.join(directory, "external.txt");
+    await writeFile(target, "trusted content\n");
+    await writeFile(external, "do not change\n");
+    const state = await snapshots.capture(target);
+    if (state.kind !== "file") throw new Error("Expected file snapshot");
+    const blob = path.join(directory, "blobs", state.blob);
+    await rm(blob);
+    await symlink(external, blob);
+
+    await expect(snapshots.capture(target)).resolves.toEqual(state);
+    expect(await readFile(external, "utf8")).toBe("do not change\n");
+    expect((await lstat(blob)).isFile()).toBe(true);
+    expect(await readFile(blob, "utf8")).toBe("trusted content\n");
+  });
+
+  it("refuses to repair a blob path that was replaced by a directory", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-blob-directory-"));
+    temporaryDirectories.push(directory);
+    const snapshots = new SnapshotStore(path.join(directory, "blobs"));
+    await snapshots.initialize();
+    const target = path.join(directory, "source.txt");
+    await writeFile(target, "trusted content\n");
+    const state = await snapshots.capture(target);
+    if (state.kind !== "file") throw new Error("Expected file snapshot");
+    const blob = path.join(directory, "blobs", state.blob);
+    await rm(blob);
+    await mkdir(blob);
+
+    await expect(snapshots.capture(target)).rejects.toThrow("refused to replace a directory");
+    expect((await lstat(blob)).isDirectory()).toBe(true);
   });
 
   it("records a hash-only after state when snapshot storage is unavailable", async () => {
