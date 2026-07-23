@@ -50,6 +50,13 @@ export interface RecoveryPreview {
   detail: string;
 }
 
+export interface UndoReadiness {
+  status: "ready" | "conflict" | "snapshot_integrity" | "unavailable";
+  checkedAt: string;
+  message: string;
+  target?: string;
+}
+
 export interface PendingApproval {
   id: string;
   tool: string;

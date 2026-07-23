@@ -258,6 +258,12 @@ describe("ApprovalServer", () => {
         }
         throw new SnapshotIntegrityError("internal blob hash details");
       },
+      checkUndoReadiness: async () => ({
+        status: "conflict" as const,
+        checkedAt: "2026-07-23T12:00:00.000Z",
+        message: "A path changed after the Agent action.",
+        target: "/tmp/newer.txt",
+      }),
     } as unknown as RewindService;
     const approval = new ApprovalServer(rewind, 32_250, 120_000, () => undefined, "linux");
     await approval.start();
@@ -276,6 +282,15 @@ describe("ApprovalServer", () => {
     expect(conflict).toMatchObject({ code: "undo_conflict", target: "/tmp/newer.txt" });
     expect(conflict.error).toContain("newer content was not overwritten");
     expect(JSON.stringify(conflict)).not.toContain("expected-secret");
+
+    const readinessResponse = await fetch(
+      `http://127.0.0.1:${approval.port}/api/change-sets/conflict/undo-readiness`,
+      { headers: { "X-Agent-Rewind-Token": "undo-error-test-token" } },
+    );
+    await expect(readinessResponse.json()).resolves.toMatchObject({
+      status: "conflict",
+      target: "/tmp/newer.txt",
+    });
 
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const integrityResponse = await fetch(

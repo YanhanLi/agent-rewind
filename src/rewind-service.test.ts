@@ -344,6 +344,9 @@ describe("RewindService", () => {
     const final = await snapshots.capture(target);
     ledger.add(change("write_file", [{ path: target, before: middle, after: final }], changeSetId));
 
+    await expect(rewind.checkUndoReadiness(changeSetId)).resolves.toMatchObject({
+      status: "ready",
+    });
     const result = await rewind.undoChangeSet(changeSetId);
 
     expect(result.status).toBe("undone");
@@ -428,6 +431,10 @@ describe("RewindService", () => {
     second.status = "undone";
     ledger.update(second);
 
+    expect(ledger.getChangeSet(changeSetId)?.status).toBe("partial");
+    await expect(rewind.checkUndoReadiness(changeSetId)).resolves.toMatchObject({
+      status: "ready",
+    });
     const result = await rewind.undoChangeSet(changeSetId);
     expect(result.status).toBe("undone");
     expect(await readFile(firstTarget, "utf8")).toBe("first before\n");
@@ -508,6 +515,9 @@ describe("RewindService", () => {
     if (firstBefore.kind !== "file") throw new Error("Expected file snapshot");
     await writeFile(path.join(directory, "blobs", firstBefore.blob), "corrupt\n");
 
+    await expect(rewind.checkUndoReadiness(changeSetId)).resolves.toMatchObject({
+      status: "snapshot_integrity",
+    });
     await expect(rewind.undoChangeSet(changeSetId)).rejects.toThrow("failed verification");
     expect(await readFile(firstTarget, "utf8")).toBe("first after\n");
     expect(await readFile(secondTarget, "utf8")).toBe("second after\n");
@@ -537,6 +547,10 @@ describe("RewindService", () => {
     );
     await writeFile(second, "user edit\n");
 
+    await expect(rewind.checkUndoReadiness(changeSetId)).resolves.toMatchObject({
+      status: "conflict",
+      target: second,
+    });
     await expect(rewind.undoChangeSet(changeSetId)).rejects.toThrow("Refusing to overwrite");
     expect(await readFile(first, "utf8")).toBe("first after\n");
     expect(await readFile(second, "utf8")).toBe("user edit\n");

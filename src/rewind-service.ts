@@ -6,10 +6,15 @@ import type {
   LocalEvent,
   PathChange,
   RecoveryPreview,
+  UndoReadiness,
 } from "./model.js";
 import { Ledger } from "./ledger.js";
 import type { OperationLock } from "./operation-lock.js";
-import { RewindConflictError, SnapshotStore } from "./snapshot-store.js";
+import {
+  RewindConflictError,
+  SnapshotIntegrityError,
+  SnapshotStore,
+} from "./snapshot-store.js";
 
 export class RewindService {
   private readonly recoveryPreviewCache = new Map<string, RecoveryPreview[]>();
@@ -128,51 +133,45 @@ export class RewindService {
     return this.operationLock.run(() => this.undoChangeSetLocked(id));
   }
 
+  async checkUndoReadiness(id: string): Promise<UndoReadiness> {
+    return this.operationLock.run(async () => {
+      const checkedAt = new Date().toISOString();
+      try {
+        await this.preflightChangeSet(id);
+        return {
+          status: "ready",
+          checkedAt,
+          message: "Current paths and required snapshots passed verification.",
+        };
+      } catch (error) {
+        if (error instanceof RewindConflictError) {
+          return {
+            status: "conflict",
+            checkedAt,
+            message: "A path changed after the Agent action. Undo would preserve the newer content.",
+            target: error.target,
+          };
+        }
+        if (error instanceof SnapshotIntegrityError) {
+          return {
+            status: "snapshot_integrity",
+            checkedAt,
+            message: "A required recovery snapshot could not be verified.",
+          };
+        }
+        return {
+          status: "unavailable",
+          checkedAt,
+          message: error instanceof Error ? error.message : "Undo readiness could not be checked.",
+        };
+      }
+    });
+  }
+
   private async undoChangeSetLocked(id: string): Promise<ChangeSetView> {
     this.ledger.recordEvent({ type: "undo_started", target: "change_set" });
     try {
-      const records = this.ledger.listByChangeSet(id);
-      if (records.length === 0) throw new Error(`Unknown change set: ${id}`);
-      if (records.some((record) => record.status === "conflict")) {
-        throw new Error("A conflicted change set cannot be resumed automatically");
-      }
-
-      const initialByPath = new Map<string, PathChange>();
-      for (const record of records) {
-        for (const change of record.paths) {
-          if (!initialByPath.has(change.path)) initialByPath.set(change.path, change);
-        }
-      }
-
-      // Simulate the whole reverse sequence before touching the filesystem. Each
-      // applied action may be fully or partly restored already if the previous
-      // process stopped between the filesystem change and the ledger update.
-      const virtualState = new Map<string, EntryState>();
-      await Promise.all(
-        [...initialByPath.keys()].map(async (target) => {
-          virtualState.set(target, await this.snapshots.inspect(target));
-        }),
-      );
-      for (const record of [...records].reverse()) {
-        if (record.status === "undone") continue;
-        for (const change of record.paths) {
-          const current = virtualState.get(change.path)!;
-          if (!statesMatch(current, change.after) && !statesMatch(current, change.before)) {
-            throw new RewindConflictError(change.path, change.after.hash, current.hash);
-          }
-          virtualState.set(change.path, change.before);
-        }
-      }
-      for (const change of initialByPath.values()) {
-        const final = virtualState.get(change.path)!;
-        if (!statesMatch(final, change.before)) {
-          throw new RewindConflictError(change.path, change.before.hash, final.hash);
-        }
-      }
-      for (const record of records) {
-        if (record.status !== "applied" || record.tool === "move_file") continue;
-        await this.verifyRecordSnapshots(record);
-      }
+      const { records, initialByPath } = await this.preflightChangeSet(id);
 
       for (const record of [...records].reverse()) {
         if (record.status === "undone") continue;
@@ -252,6 +251,58 @@ export class RewindService {
     for (const change of record.paths) {
       await this.snapshots.verifySnapshot(change.before, change.path);
     }
+  }
+
+  private async preflightChangeSet(id: string): Promise<{
+    records: ChangeRecord[];
+    initialByPath: Map<string, PathChange>;
+  }> {
+    const records = this.ledger.listByChangeSet(id);
+    if (records.length === 0) throw new Error(`Unknown change set: ${id}`);
+    if (records.every((record) => record.status === "undone")) {
+      throw new Error("This change set is already undone");
+    }
+    if (records.some((record) => record.status === "conflict")) {
+      throw new Error("A conflicted change set cannot be resumed automatically");
+    }
+
+    const initialByPath = new Map<string, PathChange>();
+    for (const record of records) {
+      for (const change of record.paths) {
+        if (!initialByPath.has(change.path)) initialByPath.set(change.path, change);
+      }
+    }
+
+    // Simulate the whole reverse sequence before touching the filesystem. Each
+    // applied action may be fully or partly restored already if the previous
+    // process stopped between the filesystem change and the ledger update.
+    const virtualState = new Map<string, EntryState>();
+    await Promise.all(
+      [...initialByPath.keys()].map(async (target) => {
+        virtualState.set(target, await this.snapshots.inspect(target));
+      }),
+    );
+    for (const record of [...records].reverse()) {
+      if (record.status === "undone") continue;
+      for (const change of record.paths) {
+        const current = virtualState.get(change.path)!;
+        if (!statesMatch(current, change.after) && !statesMatch(current, change.before)) {
+          throw new RewindConflictError(change.path, change.after.hash, current.hash);
+        }
+        virtualState.set(change.path, change.before);
+      }
+    }
+    for (const change of initialByPath.values()) {
+      const final = virtualState.get(change.path)!;
+      if (!statesMatch(final, change.before)) {
+        throw new RewindConflictError(change.path, change.before.hash, final.hash);
+      }
+    }
+    for (const record of records) {
+      if (record.status !== "applied" || record.tool === "move_file") continue;
+      await this.verifyRecordSnapshots(record);
+    }
+    return { records, initialByPath };
   }
 
   private async previewRecoveryPath(change: PathChange): Promise<RecoveryPreview> {
