@@ -27,6 +27,7 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
       ...process.env,
       AGENT_REWIND_DATA_DIR: data,
       AGENT_REWIND_TOKEN: token,
+      AGENT_REWIND_CHANGE_SET_WINDOW_MS: "1000",
     } as Record<string, string>,
     stderr: "pipe",
   });
@@ -72,10 +73,13 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
       arguments: { path: target, content: "agent change\n" },
     });
     const state = await waitForPending(port, token);
-    await post(port, token, `/api/approvals/${state.pending[0].id}/approve-session`);
+    expect(state.pending[0]).toMatchObject({ changeSetLabel: "Integration task" });
+    await post(port, token, `/api/approvals/${state.pending[0].id}/approve-set`);
     const result = await call;
     expect(result.isError).not.toBe(true);
     expect(await readFile(target, "utf8")).toBe("agent change\n");
+
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
 
     const autoApproved = await client.callTool({
       name: "write_file",
@@ -85,10 +89,13 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
 
     await client.callTool({ name: "rewind_end_change_set", arguments: {} });
     const outsideSet = path.join(root, "outside-set.txt");
-    const outsideResult = await client.callTool({
+    const outsideCall = client.callTool({
       name: "write_file",
       arguments: { path: outsideSet, content: "keep this\n" },
     });
+    const outsideApproval = await waitForPending(port, token);
+    await post(port, token, `/api/approvals/${outsideApproval.pending[0].id}/approve`);
+    const outsideResult = await outsideCall;
     expect(outsideResult.isError).not.toBe(true);
 
     const recorded = await stateFor(port, token);
@@ -134,9 +141,10 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
     const report = new Ledger(path.join(data, "ledger.sqlite")).validationReport();
     expect(report.approvals).toMatchObject({
       requested: 4,
-      sessionApproved: 1,
-      autoApproved: 2,
-      approved: 1,
+      changeSetApproved: 1,
+      sessionApproved: 0,
+      autoApproved: 1,
+      approved: 2,
     });
     expect(report.changes).toMatchObject({ actions: 4, changeSets: 3, undone: 3 });
     expect(report.undo).toEqual({ attempted: 2, succeeded: 2, conflicts: 0 });
@@ -146,7 +154,7 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
 }, 20_000);
 
 interface UiState {
-  pending: Array<{ id: string }>;
+  pending: Array<{ id: string; changeSetLabel?: string }>;
   changes: Array<{ id: string; summary: string }>;
   changeSets: Array<{ id: string; label?: string; actionCount: number }>;
 }

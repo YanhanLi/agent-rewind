@@ -92,7 +92,100 @@ describe("ApprovalServer", () => {
     expect(JSON.stringify(events)).not.toContain("private summary");
     expect(JSON.stringify(events)).not.toContain("/tmp/test.txt");
   });
+
+  it("allows an explicit change set within its first folder and revokes the rule on end", async () => {
+    const previousToken = process.env.AGENT_REWIND_TOKEN;
+    process.env.AGENT_REWIND_TOKEN = "change-set-test-token";
+    const events: unknown[] = [];
+    const rewind = {
+      list: () => [],
+      listChangeSets: () => [],
+      recordEvent: (event: unknown) => events.push(event),
+    } as unknown as RewindService;
+    const approval = new ApprovalServer(rewind, 32_230, 120_000, () => undefined, "linux");
+    await approval.start();
+    cleanup.push(async () => {
+      await approval.stop();
+      if (previousToken === undefined) delete process.env.AGENT_REWIND_TOKEN;
+      else process.env.AGENT_REWIND_TOKEN = previousToken;
+    });
+
+    const first = approval.request({
+      ...pendingInput("first action"),
+      changeSetId: "set-1",
+      changeSetLabel: "Refactor notes",
+    });
+    const state = await approvalState(approval.port, "change-set-test-token");
+    await approvalPost(
+      approval.port,
+      "change-set-test-token",
+      `/api/approvals/${state.pending[0].id}/approve-set`,
+    );
+    await expect(first).resolves.toBe(true);
+
+    await expect(
+      approval.request({
+        ...pendingInput("second action"),
+        tool: "edit_file",
+        paths: ["/tmp/second.txt"],
+        changeSetId: "set-1",
+      }),
+    ).resolves.toBe(true);
+
+    const outsideScope = approval.request({
+      ...pendingInput("outside scope"),
+      paths: ["/var/tmp/outside.txt"],
+      scope: "/var/tmp",
+      changeSetId: "set-1",
+    });
+    const pendingOutside = await approvalState(approval.port, "change-set-test-token");
+    await approvalPost(
+      approval.port,
+      "change-set-test-token",
+      `/api/approvals/${pendingOutside.pending[0].id}/reject`,
+    );
+    await expect(outsideScope).resolves.toBe(false);
+
+    approval.endChangeSet("set-1");
+    const afterEnd = approval.request({
+      ...pendingInput("after end"),
+      changeSetId: "set-1",
+    });
+    const pendingAfterEnd = await approvalState(approval.port, "change-set-test-token");
+    await approvalPost(
+      approval.port,
+      "change-set-test-token",
+      `/api/approvals/${pendingAfterEnd.pending[0].id}/reject`,
+    );
+    await expect(afterEnd).resolves.toBe(false);
+
+    expect(events).toEqual([
+      { type: "approval_requested", tool: "write_file" },
+      { type: "approval_change_set_approved", tool: "write_file" },
+      { type: "approval_requested", tool: "edit_file" },
+      { type: "approval_auto_approved", tool: "edit_file" },
+      { type: "approval_requested", tool: "write_file" },
+      { type: "approval_rejected", tool: "write_file" },
+      { type: "approval_requested", tool: "write_file" },
+      { type: "approval_rejected", tool: "write_file" },
+    ]);
+  });
 });
+
+async function approvalState(port: number, token: string): Promise<{ pending: Array<{ id: string }> }> {
+  const response = await fetch(`http://127.0.0.1:${port}/api/state`, {
+    headers: { "X-Agent-Rewind-Token": token },
+  });
+  return response.json() as Promise<{ pending: Array<{ id: string }> }>;
+}
+
+async function approvalPost(port: number, token: string, route: string): Promise<void> {
+  const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+    method: "POST",
+    headers: { "X-Agent-Rewind-Token": token },
+  });
+  if (!response.ok) throw new Error(await response.text());
+}
 
 function pendingInput(summary: string) {
   return {

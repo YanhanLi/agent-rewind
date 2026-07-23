@@ -39,6 +39,8 @@ export interface PendingApproval {
   arguments: unknown;
   paths: string[];
   scope: string;
+  changeSetId?: string;
+  changeSetLabel?: string;
   expiresAt: string;
 }
 
@@ -46,6 +48,7 @@ export type LocalEventType =
   | "approval_requested"
   | "approval_approved"
   | "approval_session_approved"
+  | "approval_change_set_approved"
   | "approval_auto_approved"
   | "approval_rejected"
   | "approval_expired"
@@ -67,6 +70,7 @@ export interface ValidationReport {
     requested: number;
     approved: number;
     sessionApproved: number;
+    changeSetApproved: number;
     autoApproved: number;
     rejected: number;
     expired: number;

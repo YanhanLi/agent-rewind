@@ -101,7 +101,9 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind uninstall 
 
 第一次出现待审批操作时，浏览器会自动打开本地审批页。默认从 `http://127.0.0.1:3219` 开始监听；若端口被占用，会自动尝试后续端口。快照和操作记录保存在 `~/.agent-rewind/`。
 
-Agent 可以调用 `rewind_begin_change_set` 和 `rewind_end_change_set` 明确标记一个多步骤任务，还可以为任务设置简短标签。未显式标记时，相隔不超过 30 秒的连续变更仍会自动聚合。整组撤销开始前会检查所有路径的最终状态；只要发现一个冲突，就不会修改任何文件。
+Agent 可以调用 `rewind_begin_change_set` 和 `rewind_end_change_set` 明确标记一个多步骤任务，还可以为任务设置简短标签。显式组持续到 `rewind_end_change_set`，不受自动聚合窗口影响。第一次操作出现时可选择 `Allow set`：之后只有同一显式组、首次批准目录范围内的操作会自动放行；组结束、路径越界或普通自动分组都会重新审批。`Allow in folder` 的范围更宽，会在当前进程内放行同类工具和目录，应谨慎选择。
+
+未显式标记时，相隔不超过 30 秒的连续变更仍会自动聚合，但不会出现 `Allow set`。整组撤销开始前会检查所有路径的最终状态；只要发现一个冲突，就不会修改任何文件。
 
 审批页通过本地心跳判断是否仍在使用。页面关闭后，下一次待审批操作会重新打开浏览器；页面仍开着时不会反复弹出。
 
@@ -150,7 +152,7 @@ Agent Rewind is a local MCP filesystem wrapper that previews mutations, requires
 Key properties:
 
 - local diff and impact preview before execution;
-- single-action and session-scoped folder approval;
+- single-action, explicit change-set, and session-scoped folder approval;
 - explicit or time-window-based change sets with task labels;
 - conflict-aware single/change-set undo with post-restore hash verification;
 - approved, reversible single-file deletion through `rewind_delete_file`;

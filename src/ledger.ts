@@ -77,6 +77,7 @@ export class Ledger {
         requested: count("approval_requested"),
         approved: count("approval_approved"),
         sessionApproved: count("approval_session_approved"),
+        changeSetApproved: count("approval_change_set_approved"),
         autoApproved: count("approval_auto_approved"),
         rejected: count("approval_rejected"),
         expired: count("approval_expired"),

@@ -1,6 +1,6 @@
 {
   "name": "agent-rewind",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Preview and safely undo filesystem actions made through MCP.",
   "type": "module",
   "bin": {

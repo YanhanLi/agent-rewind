@@ -37,7 +37,7 @@ interface ProxyOptions {
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.9.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.10.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const require = createRequire(import.meta.url);
   const filesystemPackage = require.resolve("@modelcontextprotocol/server-filesystem/package.json");
@@ -50,7 +50,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.9.0" },
+    { name: "agent-rewind", version: "0.10.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -115,6 +115,8 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     if (name === BEGIN_CHANGE_SET) {
       try {
         const label = optionalLabel(arguments_.label);
+        const replaced = changeSets.end();
+        if (replaced) options.approval.endChangeSet(replaced);
         const id = changeSets.begin(label);
         return success(`Started change set ${id}${label ? `: ${label}` : ""}.`);
       } catch (error) {
@@ -123,6 +125,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     }
     if (name === END_CHANGE_SET) {
       const ended = changeSets.end();
+      if (ended) options.approval.endChangeSet(ended);
       return success(ended ? `Ended change set ${ended}.` : "No change set was active.");
     }
     if (!MUTATING_TOOLS.has(name) || (name === "edit_file" && arguments_.dryRun === true)) {
@@ -141,6 +144,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
       }
       const detail = await preview(name, arguments_, before, upstream);
       const summary = summarize(name, targets, before, arguments_);
+      const explicitChangeSet = changeSets.explicit();
       const approved = await options.approval.request({
         tool: name,
         summary,
@@ -148,6 +152,8 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
         arguments: arguments_,
         paths: targets,
         scope: commonParent(targets),
+        changeSetId: explicitChangeSet?.id,
+        changeSetLabel: explicitChangeSet?.label,
       });
       if (!approved) {
         return denied(name);
@@ -197,12 +203,12 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
 }
 
 class ChangeSetTracker {
-  private current?: { id: string; label?: string; lastActivity: number };
+  private current?: { id: string; label?: string; lastActivity: number; explicit: boolean };
 
   constructor(private readonly windowMs: number) {}
 
   begin(label?: string, now = Date.now()): string {
-    this.current = { id: randomUUID(), label, lastActivity: now };
+    this.current = { id: randomUUID(), label, lastActivity: now, explicit: true };
     return this.current.id;
   }
 
@@ -213,12 +219,16 @@ class ChangeSetTracker {
   }
 
   next(now = Date.now()): { id: string; label?: string } {
-    if (!this.current || now - this.current.lastActivity > this.windowMs) {
-      this.current = { id: randomUUID(), lastActivity: now };
+    if (!this.current || (!this.current.explicit && now - this.current.lastActivity > this.windowMs)) {
+      this.current = { id: randomUUID(), lastActivity: now, explicit: false };
     } else {
       this.current.lastActivity = now;
     }
     return { id: this.current.id, label: this.current.label };
+  }
+
+  explicit(): { id: string; label?: string } | undefined {
+    return this.current?.explicit ? { id: this.current.id, label: this.current.label } : undefined;
   }
 }
 

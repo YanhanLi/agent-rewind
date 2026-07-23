@@ -14,6 +14,7 @@ interface Waiter {
 export class ApprovalServer {
   private readonly pending = new Map<string, Waiter>();
   private readonly sessionRules: Array<{ tool: string; scope: string }> = [];
+  private readonly changeSetRules = new Map<string, string>();
   private readonly token = process.env.AGENT_REWIND_TOKEN ?? randomBytes(24).toString("base64url");
   private httpServer?: Server;
   private activePort = 0;
@@ -48,7 +49,10 @@ export class ApprovalServer {
 
   request(input: Omit<PendingApproval, "id" | "expiresAt">): Promise<boolean> {
     this.rewind.recordEvent({ type: "approval_requested", tool: input.tool });
-    if (this.sessionRules.some((rule) => matchesRule(rule, input))) {
+    if (
+      this.sessionRules.some((rule) => matchesRule(rule, input)) ||
+      matchesChangeSetRule(this.changeSetRules, input)
+    ) {
       this.rewind.recordEvent({ type: "approval_auto_approved", tool: input.tool });
       return Promise.resolve(true);
     }
@@ -79,6 +83,10 @@ export class ApprovalServer {
 
   get port(): number {
     return this.activePort;
+  }
+
+  endChangeSet(id: string): void {
+    this.changeSetRules.delete(id);
   }
 
   async stop(): Promise<void> {
@@ -133,14 +141,23 @@ export class ApprovalServer {
         return;
       }
       const approval = requestUrl.pathname.match(
-        /^\/api\/approvals\/([^/]+)\/(approve|approve-session|reject)$/,
+        /^\/api\/approvals\/([^/]+)\/(approve|approve-session|approve-set|reject)$/,
       );
       if (request.method === "POST" && approval) {
         const waiter = this.pending.get(approval[1]);
         if (!waiter) throw new Error("Approval request no longer exists");
+        if (approval[2] === "approve-set" && !waiter.request.changeSetId) {
+          throw new Error("This action is not part of an explicit change set");
+        }
         this.pending.delete(approval[1]);
         clearTimeout(waiter.timer);
-        if (approval[2] === "approve-session") {
+        if (approval[2] === "approve-set") {
+          this.changeSetRules.set(waiter.request.changeSetId!, waiter.request.scope);
+          this.rewind.recordEvent({
+            type: "approval_change_set_approved",
+            tool: waiter.request.tool,
+          });
+        } else if (approval[2] === "approve-session") {
           this.sessionRules.push({ tool: waiter.request.tool, scope: waiter.request.scope });
           this.rewind.recordEvent({
             type: "approval_session_approved",
@@ -197,6 +214,19 @@ function matchesRule(
   });
 }
 
+function matchesChangeSetRule(
+  rules: Map<string, string>,
+  request: Pick<PendingApproval, "changeSetId" | "paths">,
+): boolean {
+  if (!request.changeSetId) return false;
+  const scope = rules.get(request.changeSetId);
+  if (!scope) return false;
+  return request.paths.every((target) => {
+    const relative = path.relative(scope, target);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
+}
+
 function page(token: string): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -208,6 +238,6 @@ const token=${JSON.stringify(token)};const headers={'X-Agent-Rewind-Token':token
 const countSummary=x=>x.actionCount+' action'+(x.actionCount===1?'':'s')+' across '+x.affectedPaths.length+' path'+(x.affectedPaths.length===1?'':'s');
 const setTitle=x=>x.label?esc(x.label):countSummary(x);const setMeta=x=>(x.label?countSummary(x)+' · ':'')+new Date(x.createdAt).toLocaleString()+' · change set '+esc(x.id.slice(0,8));
 async function post(url){const r=await fetch(url,{method:'POST',headers});const body=await r.json();if(!r.ok)alert(body.error);await refresh()}
-async function refresh(){const r=await fetch('/api/state',{headers});if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject')">Reject</button> <button onclick="post('/api/approvals/\${x.id}/approve-session')">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve')">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';document.querySelector('#history').innerHTML=s.changeSets.length?s.changeSets.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status">\${esc(x.status)}</span> \${x.status==='applied'?\`<button class="undo" onclick="post('/api/change-sets/\${x.id}/undo')">Undo set</button>\`:''}</div></div><div class="paths">\${x.affectedPaths.map(esc).join('<br>')}</div><div class="actions">\${x.changes.map(c=>\`<div class="action">\${esc(c.summary)}</div>\`).join('')}</div></div>\`).join(''):'<div class="empty">No recorded changes yet.</div>'}refresh();setInterval(refresh,1000);
+async function refresh(){const r=await fetch('/api/state',{headers});if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}\${x.changeSetLabel?' · '+esc(x.changeSetLabel):''}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject')">Reject</button> \${x.changeSetId?\`<button onclick="post('/api/approvals/\${x.id}/approve-set')">Allow set</button>\`:''} <button onclick="post('/api/approvals/\${x.id}/approve-session')">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve')">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';document.querySelector('#history').innerHTML=s.changeSets.length?s.changeSets.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status">\${esc(x.status)}</span> \${x.status==='applied'?\`<button class="undo" onclick="post('/api/change-sets/\${x.id}/undo')">Undo set</button>\`:''}</div></div><div class="paths">\${x.affectedPaths.map(esc).join('<br>')}</div><div class="actions">\${x.changes.map(c=>\`<div class="action">\${esc(c.summary)}</div>\`).join('')}</div></div>\`).join(''):'<div class="empty">No recorded changes yet.</div>'}refresh();setInterval(refresh,1000);
 </script></body></html>`;
 }
