@@ -222,6 +222,14 @@ it("recovers an approved mutation after the MCP process is killed", async () => 
       id: recovered.changeSets[0].id,
       recoveryStatus: "pending",
     });
+    const previews = await recoveryPreviewsFor(
+      secondPort,
+      token,
+      recovered.recovered[0].id,
+    );
+    expect(previews).toMatchObject([{ path: target, kind: "text" }]);
+    expect(previews[0].detail).toContain("-before crash");
+    expect(previews[0].detail).toContain("+after crash");
     await post(secondPort, token, `/api/change-sets/${recovered.changeSets[0].id}/review`);
     await post(secondPort, token, `/api/change-sets/${recovered.changeSets[0].id}/review`);
     const reviewed = await stateFor(secondPort, token);
@@ -267,7 +275,23 @@ interface UiState {
     actionCount: number;
     recoveryStatus?: "pending" | "reviewed";
   }>;
-  recovered: Array<{ id: string; recoveryStatus: "pending" }>;
+  recovered: Array<{
+    id: string;
+    recoveryStatus: "pending";
+  }>;
+}
+
+async function recoveryPreviewsFor(
+  port: number,
+  token: string,
+  changeSetId: string,
+): Promise<Array<{ path: string; kind: "text" | "summary"; detail: string }>> {
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/change-sets/${changeSetId}/recovery-preview`,
+    { headers: { "X-Agent-Rewind-Token": token } },
+  );
+  if (!response.ok) throw new Error(await response.text());
+  return ((await response.json()) as { previews: Array<{ path: string; kind: "text" | "summary"; detail: string }> }).previews;
 }
 
 async function stateFor(port: number, token: string): Promise<UiState> {

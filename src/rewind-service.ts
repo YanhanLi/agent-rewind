@@ -1,8 +1,18 @@
-import type { ChangeRecord, ChangeSetView, LocalEvent, PathChange } from "./model.js";
+import { createTwoFilesPatch } from "diff";
+import type {
+  ChangeRecord,
+  ChangeSetView,
+  EntryState,
+  LocalEvent,
+  PathChange,
+  RecoveryPreview,
+} from "./model.js";
 import { Ledger } from "./ledger.js";
 import { RewindConflictError, SnapshotStore } from "./snapshot-store.js";
 
 export class RewindService {
+  private readonly recoveryPreviewCache = new Map<string, RecoveryPreview[]>();
+
   constructor(
     private readonly ledger: Ledger,
     private readonly snapshots: SnapshotStore,
@@ -71,6 +81,33 @@ export class RewindService {
     const changeSet = this.ledger.markRecoveryReviewed(id, new Date().toISOString());
     this.ledger.recordEvent({ type: "recovery_reviewed", target: "change_set" });
     return changeSet;
+  }
+
+  async recoveryPreviews(id: string): Promise<RecoveryPreview[]> {
+    const cached = this.recoveryPreviewCache.get(id);
+    if (cached) return cached;
+    const changeSet = this.ledger.getChangeSet(id);
+    if (!changeSet) throw new Error(`Unknown change set: ${id}`);
+    if (!changeSet.recoveryStatus) {
+      throw new Error("This change set was not recovered after an interruption");
+    }
+    const previews: RecoveryPreview[] = [];
+    for (const record of changeSet.changes) {
+      if (!record.recoveredAt) continue;
+      for (const change of record.paths) {
+        try {
+          previews.push(await this.previewRecoveryPath(change));
+        } catch {
+          previews.push({
+            path: change.path,
+            kind: "summary",
+            detail: "Preview unavailable. The snapshot is still retained for conflict checks and undo.",
+          });
+        }
+      }
+    }
+    this.recoveryPreviewCache.set(id, previews);
+    return previews;
   }
 
   async undoChangeSet(id: string): Promise<ChangeSetView> {
@@ -160,4 +197,102 @@ export class RewindService {
     this.ledger.update(record);
     return record;
   }
+
+  private async previewRecoveryPath(change: PathChange): Promise<RecoveryPreview> {
+    const maxSize = Math.max(fileSize(change.before), fileSize(change.after));
+    if (
+      change.before.kind === "directory" ||
+      change.after.kind === "directory" ||
+      maxSize > RECOVERY_TEXT_PREVIEW_MAX_BYTES
+    ) {
+      return {
+        path: change.path,
+        kind: "summary",
+        detail: stateSummary(change.before, "before") + "\n" + stateSummary(change.after, "after"),
+      };
+    }
+    const [beforeBuffer, afterBuffer] = await Promise.all([
+      this.snapshots.readFileState(change.before),
+      this.snapshots.readFileState(change.after),
+    ]);
+    if (!beforeBuffer || !afterBuffer) {
+      return {
+        path: change.path,
+        kind: "summary",
+        detail: stateSummary(change.before, "before") + "\n" + stateSummary(change.after, "after"),
+      };
+    }
+    const before = decodeText(beforeBuffer);
+    const after = decodeText(afterBuffer);
+    if (before === undefined || after === undefined) {
+      return {
+        path: change.path,
+        kind: "summary",
+        detail:
+          "Binary content is not displayed.\n" +
+          stateSummary(change.before, "before") +
+          "\n" +
+          stateSummary(change.after, "after"),
+      };
+    }
+    const diff = createTwoFilesPatch(change.path, change.path, before, after, "before", "after");
+    return {
+      path: change.path,
+      kind: "text",
+      detail:
+        diff.length > RECOVERY_DIFF_MAX_CHARACTERS
+          ? `${diff.slice(0, RECOVERY_DIFF_MAX_CHARACTERS)}\n\n[Diff truncated]`
+          : diff,
+    };
+  }
+}
+
+const RECOVERY_TEXT_PREVIEW_MAX_BYTES = 128 * 1024;
+const RECOVERY_DIFF_MAX_CHARACTERS = 40_000;
+
+function fileSize(state: EntryState): number {
+  return state.kind === "file" ? state.size : 0;
+}
+
+function decodeText(content: Buffer): string | undefined {
+  if (content.includes(0)) return undefined;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    return undefined;
+  }
+}
+
+function stateSummary(state: EntryState, label: string): string {
+  if (state.kind === "missing") return `${label}: missing`;
+  if (state.kind === "file") {
+    return `${label}: file, ${formatBytes(state.size)}, sha256 ${state.hash.slice(0, 12)}`;
+  }
+  const totals = directoryTotals(state);
+  return `${label}: directory, ${totals.files} files, ${totals.directories} directories, ${formatBytes(totals.bytes)}, sha256 ${state.hash.slice(0, 12)}`;
+}
+
+function directoryTotals(state: EntryState): { files: number; directories: number; bytes: number } {
+  if (state.kind !== "directory") return { files: 0, directories: 0, bytes: 0 };
+  let files = 0;
+  let directories = 1;
+  let bytes = 0;
+  for (const child of Object.values(state.children ?? {})) {
+    if (child.kind === "file") {
+      files += 1;
+      bytes += child.size;
+    } else if (child.kind === "directory") {
+      const nested = directoryTotals(child);
+      files += nested.files;
+      directories += nested.directories;
+      bytes += nested.bytes;
+    }
+  }
+  return { files, directories, bytes };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }

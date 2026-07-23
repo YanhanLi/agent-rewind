@@ -142,7 +142,7 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 
 每个已批准的变更会在执行前写入本地 SQLite intent。正常完成时，intent 和正式变更记录在同一事务中交接；如果 Agent Rewind、客户端或系统在文件操作后退出，下一次启动会先比较 intent 中的原始快照与磁盘现状：状态已变化则补全可撤销记录，状态未变化则丢弃未执行的 intent。恢复数量会显示在启动日志和 `agent-rewind report` 中。
 
-补全的记录会进入审批页独立的 **Recovered changes** 队列，不会静默混入普通历史。检查受影响路径后，可以选择 `Keep changes` 确认保留，也可以直接 `Undo set`；确认保留只结束待检查状态，不会移除之后的撤销能力。
+补全的记录会进入审批页独立的 **Recovered changes** 队列，不会静默混入普通历史。文本文件会根据持久化的 before/after 快照显示 unified diff；二进制、目录和超过 128 KiB 的文件只显示类型、大小和短哈希摘要。检查证据后，可以选择 `Keep changes` 确认保留，也可以直接 `Undo set`；确认保留只结束待检查状态，不会移除之后的撤销能力。
 
 这项机制处理的是“已进入 Agent Rewind 的操作在执行过程中被中断”，不是文件系统事务，也不能判断进程退出后由其他程序产生的写入。因此恢复出的记录在撤销前仍会执行冲突检查，用户应先查看变更内容再撤销。
 
@@ -152,6 +152,7 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - 可选 OpenCode guard 会阻断内置 `edit`、`write` 和 `apply_patch`；可选 Codex guard 会阻断 `apply_patch`。guard 不会自动安装，也不会修改 OpenCode 全局 permission。
 - shell 命令、第三方插件和绕过平台标准 hook 的工具仍可能直接写文件。Guard 模式是路由约束，不是操作系统级强制边界。
 - 本地 API 使用随机能力令牌和 Origin 校验，审批默认在两分钟后失效。
+- 恢复 diff 仅通过带能力令牌的 localhost 审批页提供，不写入最小化事件表；它仍可能包含本地文件内容，分享页面截图前应自行检查。
 - 符号链接和特殊文件会被快照层拒绝。
 - `rewind_delete_directory` 不能删除配置根目录；目录内任何条目无法完整快照时，删除不会开始。
 - 进程意外退出后会在下次启动对账未完成的 intent；如果目标暂时无法读取，intent 会保留到后续启动，不会自动丢弃原始快照。
@@ -188,6 +189,7 @@ Key properties:
 - local SQLite ledger and content-addressed snapshots;
 - crash recovery through persistent pre-mutation intents and startup reconciliation;
 - a dedicated recovery-review queue with explicit keep or undo decisions;
+- bounded snapshot-backed diffs with binary, directory, and large-file summaries;
 - no account or cloud service.
 - safe Claude Desktop install/uninstall with dry-run, backup, and atomic replacement.
 - local-only, privacy-minimized validation metrics via `agent-rewind report`.

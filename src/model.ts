@@ -44,6 +44,12 @@ export interface ChangeSetView {
   changes: ChangeRecord[];
 }
 
+export interface RecoveryPreview {
+  path: string;
+  kind: "text" | "summary";
+  detail: string;
+}
+
 export interface PendingApproval {
   id: string;
   tool: string;

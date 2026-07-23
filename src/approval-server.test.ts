@@ -1,4 +1,5 @@
 import { createServer } from "node:net";
+import { Script } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalServer } from "./approval-server.js";
 import type { ChangeRecord } from "./model.js";
@@ -233,6 +234,13 @@ describe("ApprovalServer", () => {
     expect(body).toContain("/tmp/archive");
     expect(body).not.toContain("private.txt");
     expect(body).not.toContain("secret-hash");
+
+    const pageResponse = await fetch(
+      `http://127.0.0.1:${approval.port}/?token=public-history-test-token`,
+    );
+    const script = (await pageResponse.text()).match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    expect(() => new Script(script!)).not.toThrow();
   });
 });
 

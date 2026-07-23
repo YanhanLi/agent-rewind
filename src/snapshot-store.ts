@@ -39,6 +39,12 @@ export class SnapshotStore {
     return removed;
   }
 
+  async readFileState(state: EntryState): Promise<Buffer | undefined> {
+    if (state.kind === "missing") return Buffer.alloc(0);
+    if (state.kind === "directory") return undefined;
+    return readFile(path.join(this.blobDirectory, state.blob));
+  }
+
   async capture(target: string): Promise<EntryState> {
     let info;
     try {

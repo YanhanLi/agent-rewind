@@ -45,6 +45,10 @@ describe("RewindService", () => {
     expect(changed.ledger.listIntents()).toHaveLength(0);
     expect(changed.ledger.get(changedIntent.id)?.status).toBe("applied");
     expect(changed.ledger.getChangeSet(changedIntent.changeSetId)?.recoveryStatus).toBe("pending");
+    const previews = await changed.rewind.recoveryPreviews(changedIntent.changeSetId);
+    expect(previews).toMatchObject([{ path: changedTarget, kind: "text" }]);
+    expect(previews[0].detail).toContain("-before crash");
+    expect(previews[0].detail).toContain("+after crash");
     expect(changed.rewind.reviewRecoveredChangeSet(changedIntent.changeSetId).recoveryStatus).toBe(
       "reviewed",
     );
@@ -84,6 +88,46 @@ describe("RewindService", () => {
     });
     expect(ledger.listIntents()).toEqual([pendingIntent]);
     expect(ledger.referencedBlobs()).toContain(before.kind === "file" ? before.blob : "");
+  });
+
+  it("uses summaries instead of displaying binary or large recovered files", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const binaryTarget = path.join(directory, "image.bin");
+    const largeTarget = path.join(directory, "large.txt");
+    await writeFile(binaryTarget, Buffer.from([0, 1, 2, 255]));
+    await writeFile(largeTarget, Buffer.alloc(128 * 1024 + 1, 65));
+    const [binaryBefore, largeBefore] = await Promise.all([
+      snapshots.capture(binaryTarget),
+      snapshots.capture(largeTarget),
+    ]);
+    await writeFile(binaryTarget, Buffer.from([0, 3, 4, 255]));
+    await writeFile(largeTarget, Buffer.alloc(128 * 1024 + 1, 66));
+    const [binaryAfter, largeAfter] = await Promise.all([
+      snapshots.capture(binaryTarget),
+      snapshots.capture(largeTarget),
+    ]);
+    const id = randomUUID();
+    ledger.add({
+      id,
+      changeSetId: id,
+      tool: "write_file",
+      summary: "Recovered non-previewable files",
+      createdAt: new Date().toISOString(),
+      recoveredAt: new Date().toISOString(),
+      status: "applied",
+      paths: [
+        { path: binaryTarget, before: binaryBefore, after: binaryAfter },
+        { path: largeTarget, before: largeBefore, after: largeAfter },
+      ],
+    });
+
+    const previews = await rewind.recoveryPreviews(id);
+    expect(previews).toHaveLength(2);
+    expect(previews[0]).toMatchObject({ path: binaryTarget, kind: "summary" });
+    expect(previews[0].detail).toContain("Binary content is not displayed");
+    expect(previews[1]).toMatchObject({ path: largeTarget, kind: "summary" });
+    expect(previews[1].detail).toContain("sha256");
+    expect(previews[1].detail).not.toContain("AAAA");
   });
 
   it("restores an overwritten file and verifies the result", async () => {
