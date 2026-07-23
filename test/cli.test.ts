@@ -15,7 +15,7 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.15.0");
+    expect(output.trim()).toBe("agent-rewind 0.16.0");
   });
 
   it("prints an empty local validation report as JSON", async () => {

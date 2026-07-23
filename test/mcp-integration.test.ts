@@ -245,6 +245,54 @@ it("recovers an approved mutation after the MCP process is killed", async () => 
   }
 }, 20_000);
 
+it("serializes concurrent approved writes against the same captured state", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-race-root-"));
+  const data = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-race-data-"));
+  directories.push(root, data);
+  const target = path.join(root, "shared.txt");
+  await writeFile(target, "original\n");
+  const token = "concurrent-write-test-token";
+  const port = 35_700 + Math.floor(Math.random() * 200);
+  const transport = proxyTransport(root, data, token, port);
+  const client = new Client({ name: "concurrent-test", version: "1.0.0" });
+
+  try {
+    await client.connect(transport);
+    await client.callTool({
+      name: "rewind_begin_change_set",
+      arguments: { label: "Concurrent task" },
+    });
+    const firstCall = client.callTool({
+      name: "write_file",
+      arguments: { path: target, content: "first write\n" },
+    });
+    const secondCall = client.callTool({
+      name: "write_file",
+      arguments: { path: target, content: "second write\n" },
+    });
+    const pending = await waitForPendingCount(port, token, 2);
+    await client.callTool({ name: "rewind_end_change_set", arguments: {} });
+    await Promise.all(
+      pending.pending.map((approval) =>
+        post(port, token, `/api/approvals/${approval.id}/approve`),
+      ),
+    );
+    const results = await Promise.all([firstCall, secondCall]);
+    expect(results.filter((result) => result.isError === true)).toHaveLength(1);
+    expect(["first write\n", "second write\n"]).toContain(await readFile(target, "utf8"));
+
+    const state = await stateFor(port, token);
+    expect(state.changes).toHaveLength(1);
+    expect(state.changeSets).toHaveLength(1);
+    expect(state.changeSets[0].label).toBe("Concurrent task");
+    expect(new Ledger(path.join(data, "ledger.sqlite")).listIntents()).toHaveLength(0);
+    await post(port, token, `/api/change-sets/${state.changeSets[0].id}/undo`);
+    expect(await readFile(target, "utf8")).toBe("original\n");
+  } finally {
+    await transport.close();
+  }
+}, 20_000);
+
 function proxyTransport(
   root: string,
   data: string,
@@ -302,16 +350,24 @@ async function stateFor(port: number, token: string): Promise<UiState> {
 }
 
 async function waitForPending(port: number, token: string): Promise<UiState> {
+  return waitForPendingCount(port, token, 1);
+}
+
+async function waitForPendingCount(
+  port: number,
+  token: string,
+  count: number,
+): Promise<UiState> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const state = await stateFor(port, token);
-      if (state.pending.length > 0) return state;
+      if (state.pending.length >= count) return state;
     } catch {
       // The local UI can take a few milliseconds to bind after MCP initialization.
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("Timed out waiting for approval request");
+  throw new Error(`Timed out waiting for ${count} approval request(s)`);
 }
 
 async function post(port: number, token: string, route: string): Promise<void> {
