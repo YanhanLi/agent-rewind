@@ -206,6 +206,9 @@ export class ApprovalServer {
       response.statusCode = 404;
       response.end(JSON.stringify({ error: "Not found" }));
     } catch (error) {
+      if (error instanceof SnapshotIntegrityError) {
+        process.stderr.write(`Agent Rewind snapshot verification failed: ${error.message}\n`);
+      }
       const failure = publicApiError(error);
       response.statusCode = failure.status;
       response.end(

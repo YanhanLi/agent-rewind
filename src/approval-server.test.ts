@@ -277,6 +277,7 @@ describe("ApprovalServer", () => {
     expect(conflict.error).toContain("newer content was not overwritten");
     expect(JSON.stringify(conflict)).not.toContain("expected-secret");
 
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const integrityResponse = await fetch(
       `http://127.0.0.1:${approval.port}/api/change-sets/integrity/undo`,
       { method: "POST", headers: { "X-Agent-Rewind-Token": "undo-error-test-token" } },
@@ -286,6 +287,10 @@ describe("ApprovalServer", () => {
     expect(integrity.code).toBe("snapshot_integrity");
     expect(integrity.error).toContain("Unverified content was not written");
     expect(JSON.stringify(integrity)).not.toContain("internal blob hash details");
+    expect(stderr).toHaveBeenCalledWith(
+      "Agent Rewind snapshot verification failed: internal blob hash details\n",
+    );
+    stderr.mockRestore();
   });
 });
 
