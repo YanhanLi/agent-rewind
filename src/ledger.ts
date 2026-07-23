@@ -15,6 +15,8 @@ export class Ledger {
 
   constructor(filename: string) {
     this.database = new DatabaseSync(filename);
+    this.database.exec("PRAGMA busy_timeout = 5000");
+    this.database.exec("PRAGMA journal_mode = WAL");
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS changes (
         id TEXT PRIMARY KEY,

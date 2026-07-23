@@ -199,7 +199,7 @@ export class ApprovalServer {
       }
       const reviewSet = requestUrl.pathname.match(/^\/api\/change-sets\/([^/]+)\/review$/);
       if (request.method === "POST" && reviewSet) {
-        response.end(JSON.stringify(this.rewind.reviewRecoveredChangeSet(reviewSet[1])));
+        response.end(JSON.stringify(await this.rewind.reviewRecoveredChangeSet(reviewSet[1])));
         return;
       }
       response.statusCode = 404;

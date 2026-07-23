@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { EntryState, PathChange } from "./model.js";
 
@@ -7,6 +7,7 @@ const MISSING_HASH = createHash("sha256").update("missing").digest("hex");
 
 export class SnapshotStore {
   private totalBlobBytes = 0;
+  private blobWriteTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly blobDirectory: string,
@@ -18,24 +19,24 @@ export class SnapshotStore {
 
   async initialize(): Promise<void> {
     await mkdir(this.blobDirectory, { recursive: true });
-    const blobs = await readdir(this.blobDirectory);
-    const sizes = await Promise.all(
-      blobs.map(async (name) => (await lstat(path.join(this.blobDirectory, name))).size),
-    );
-    this.totalBlobBytes = sizes.reduce((total, size) => total + size, 0);
+    await this.refreshTotalBlobBytes();
   }
 
-  async garbageCollect(referencedBlobs: Set<string>): Promise<number> {
+  async garbageCollect(
+    referencedBlobs: Set<string>,
+    minimumUnreferencedAgeMs = 5 * 60 * 1_000,
+  ): Promise<number> {
     let removed = 0;
+    const cutoff = Date.now() - minimumUnreferencedAgeMs;
     for (const name of await readdir(this.blobDirectory)) {
       if (referencedBlobs.has(name)) continue;
       const filename = path.join(this.blobDirectory, name);
       const info = await lstat(filename);
-      if (!info.isFile()) continue;
+      if (!info.isFile() || info.mtimeMs > cutoff) continue;
       await rm(filename);
-      this.totalBlobBytes -= info.size;
       removed += 1;
     }
+    await this.refreshTotalBlobBytes();
     return removed;
   }
 
@@ -67,24 +68,13 @@ export class SnapshotStore {
         );
       }
       const content = await readFile(target);
-      const hash = createHash("sha256").update(content).digest("hex");
-      const blob = path.join(this.blobDirectory, hash);
-      try {
-        await lstat(blob);
-      } catch (lookupError) {
-        if ((lookupError as NodeJS.ErrnoException).code !== "ENOENT") throw lookupError;
-        if (this.totalBlobBytes + content.byteLength > this.limits.maxTotalBytes) {
-          throw new Error(
-            `Snapshot storage quota exceeded (${formatBytes(this.limits.maxTotalBytes)}).`,
-          );
-        }
-        try {
-          await writeFile(blob, content, { flag: "wx" });
-          this.totalBlobBytes += content.byteLength;
-        } catch (writeError) {
-          if ((writeError as NodeJS.ErrnoException).code !== "EEXIST") throw writeError;
-        }
+      if (content.byteLength > this.limits.maxFileBytes) {
+        throw new Error(
+          `Snapshot exceeds the per-file limit (${formatBytes(content.byteLength)} > ${formatBytes(this.limits.maxFileBytes)}): ${target}`,
+        );
       }
+      const hash = createHash("sha256").update(content).digest("hex");
+      await this.ensureBlob(hash, content);
       return { kind: "file", hash, blob: hash, size: content.byteLength };
     }
 
@@ -188,6 +178,49 @@ export class SnapshotStore {
         await this.restoreDirectoryContents(childTarget, child);
       }
     }
+  }
+
+  private async ensureBlob(hash: string, content: Buffer): Promise<void> {
+    const result = this.blobWriteTail.then(async () => {
+      const blob = path.join(this.blobDirectory, hash);
+      try {
+        await lstat(blob);
+        const now = new Date();
+        await utimes(blob, now, now);
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+
+      await this.refreshTotalBlobBytes();
+      if (this.totalBlobBytes + content.byteLength > this.limits.maxTotalBytes) {
+        throw new Error(`Snapshot storage quota exceeded (${formatBytes(this.limits.maxTotalBytes)}).`);
+      }
+      try {
+        await writeFile(blob, content, { flag: "wx" });
+        this.totalBlobBytes += content.byteLength;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const now = new Date();
+        await utimes(blob, now, now);
+        await this.refreshTotalBlobBytes();
+      }
+    });
+    this.blobWriteTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async refreshTotalBlobBytes(): Promise<void> {
+    const sizes = await Promise.all(
+      (await readdir(this.blobDirectory)).map(async (name) => {
+        const info = await lstat(path.join(this.blobDirectory, name));
+        return info.isFile() ? info.size : 0;
+      }),
+    );
+    this.totalBlobBytes = sizes.reduce((total, size) => total + size, 0);
   }
 }
 

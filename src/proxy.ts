@@ -16,6 +16,7 @@ import type { ApprovalServer } from "./approval-server.js";
 import type { ChangeIntent, ChangeRecord, EntryState, PathChange } from "./model.js";
 import type { Ledger } from "./ledger.js";
 import type { SnapshotStore } from "./snapshot-store.js";
+import type { OperationLock } from "./operation-lock.js";
 
 const DELETE_FILE = "rewind_delete_file";
 const DELETE_DIRECTORY = "rewind_delete_directory";
@@ -35,11 +36,12 @@ interface ProxyOptions {
   approval: ApprovalServer;
   snapshots: SnapshotStore;
   ledger: Ledger;
+  operationLock: OperationLock;
   changeSetWindowMs: number;
 }
 
 export async function startProxy(options: ProxyOptions): Promise<() => Promise<void>> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.18.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.19.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const mutationQueue = new SerialQueue();
   const require = createRequire(import.meta.url);
@@ -53,7 +55,7 @@ export async function startProxy(options: ProxyOptions): Promise<() => Promise<v
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.18.0" },
+    { name: "agent-rewind", version: "0.19.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -155,7 +157,9 @@ export async function startProxy(options: ProxyOptions): Promise<() => Promise<v
 
     try {
       const targets = await targetPaths(name, arguments_, options.roots);
-      const before = await Promise.all(targets.map((target) => options.snapshots.capture(target)));
+      const before = await options.operationLock.run(() =>
+        Promise.all(targets.map((target) => options.snapshots.capture(target))),
+      );
       if (name === DELETE_FILE && before[0].kind !== "file") {
         throw new Error(
           before[0].kind === "directory"
@@ -192,46 +196,53 @@ export async function startProxy(options: ProxyOptions): Promise<() => Promise<v
         return denied(name);
       }
 
-      return mutationQueue.run(async () => {
-        // Serialize this second check with execution so concurrent approvals cannot
-        // both validate the same old state and produce inconsistent undo records.
-        const atExecution = await Promise.all(
-          targets.map((target) => options.snapshots.capture(target)),
-        );
-        if (atExecution.some((state, index) => state.hash !== before[index].hash)) {
-          return failure("The target changed while approval was pending. Review and retry.");
-        }
-
-        const changeSet = explicitChangeSet ?? changeSets.next();
-        const intent: ChangeIntent = {
-          id: randomUUID(),
-          changeSetId: changeSet.id,
-          changeSetLabel: changeSet.label,
-          tool: name,
-          summary,
-          createdAt: new Date().toISOString(),
-          paths: targets.map((target, index) => ({ path: target, before: before[index] })),
-        };
-        options.ledger.beginIntent(intent);
-
-        let result: CallToolResult | undefined;
-        let executionError: unknown;
-        try {
-          result =
-            name === DELETE_FILE || name === DELETE_DIRECTORY
-              ? await deleteTarget(name, targets[0])
-              : ((await upstream.callTool(request.params)) as CallToolResult);
-          if (process.env.AGENT_REWIND_TEST_CRASH_AFTER_MUTATION === "1") {
-            process.kill(process.pid, "SIGKILL");
+      return await mutationQueue.run(() =>
+        options.operationLock.run(async () => {
+          // Serialize this second check with execution so concurrent approvals cannot
+          // both validate the same old state and produce inconsistent undo records.
+          const executionTargets = await targetPaths(name, arguments_, options.roots);
+          const atExecution = await Promise.all(
+            executionTargets.map((target) => options.snapshots.capture(target)),
+          );
+          if (atExecution.some((state, index) => state.hash !== before[index].hash)) {
+            return failure("The target changed while approval was pending. Review and retry.");
           }
-        } catch (error) {
-          executionError = error;
-        }
 
-        await settleIntent(intent, targets, before, options);
-        if (executionError) throw executionError;
-        return result!;
-      });
+          const changeSet = explicitChangeSet ?? changeSets.next();
+          const intent: ChangeIntent = {
+            id: randomUUID(),
+            changeSetId: changeSet.id,
+            changeSetLabel: changeSet.label,
+            tool: name,
+            summary,
+            createdAt: new Date().toISOString(),
+            paths: targets.map((target, index) => ({ path: target, before: before[index] })),
+          };
+          options.ledger.beginIntent(intent);
+          const testDelayMs = Number(process.env.AGENT_REWIND_TEST_DELAY_AFTER_INTENT_MS ?? 0);
+          if (Number.isFinite(testDelayMs) && testDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, testDelayMs));
+          }
+
+          let result: CallToolResult | undefined;
+          let executionError: unknown;
+          try {
+            result =
+              name === DELETE_FILE || name === DELETE_DIRECTORY
+                ? await deleteTarget(name, targets[0])
+                : ((await upstream.callTool(request.params)) as CallToolResult);
+            if (process.env.AGENT_REWIND_TEST_CRASH_AFTER_MUTATION === "1") {
+              process.kill(process.pid, "SIGKILL");
+            }
+          } catch (error) {
+            executionError = error;
+          }
+
+          await settleIntent(intent, targets, before, options);
+          if (executionError) throw executionError;
+          return result!;
+        }),
+      );
     } catch (error) {
       return failure((error as Error).message);
     }

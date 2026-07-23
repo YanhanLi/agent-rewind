@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger } from "./ledger.js";
 import type { ChangeIntent, ChangeRecord } from "./model.js";
+import { SqliteOperationLock } from "./operation-lock.js";
 import { RewindService } from "./rewind-service.js";
 import { SnapshotStore } from "./snapshot-store.js";
 
@@ -49,7 +50,7 @@ describe("RewindService", () => {
     expect(previews).toMatchObject([{ path: changedTarget, kind: "text" }]);
     expect(previews[0].detail).toContain("-before crash");
     expect(previews[0].detail).toContain("+after crash");
-    expect(changed.rewind.reviewRecoveredChangeSet(changedIntent.changeSetId).recoveryStatus).toBe(
+    expect((await changed.rewind.reviewRecoveredChangeSet(changedIntent.changeSetId)).recoveryStatus).toBe(
       "reviewed",
     );
     expect(changed.ledger.get(changedIntent.id)?.reviewedAt).toBeDefined();
@@ -88,6 +89,45 @@ describe("RewindService", () => {
     });
     expect(ledger.listIntents()).toEqual([pendingIntent]);
     expect(ledger.referencedBlobs()).toContain(before.kind === "file" ? before.blob : "");
+  });
+
+  it("does not let concurrent recovery review overwrite an undo", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-review-race-"));
+    temporaryDirectories.push(directory);
+    const snapshots = new SnapshotStore(path.join(directory, "blobs"));
+    await snapshots.initialize();
+    const filename = path.join(directory, "ledger.sqlite");
+    const firstLedger = new Ledger(filename);
+    const secondLedger = new Ledger(filename);
+    const lockFilename = path.join(directory, "operation-lock.sqlite");
+    const first = new RewindService(
+      firstLedger,
+      snapshots,
+      new SqliteOperationLock(lockFilename, 5),
+    );
+    const second = new RewindService(
+      secondLedger,
+      snapshots,
+      new SqliteOperationLock(lockFilename, 5),
+    );
+    const target = path.join(directory, "recovered.txt");
+    await writeFile(target, "before\n");
+    const before = await snapshots.capture(target);
+    const pending = intent("write_file", target, before);
+    firstLedger.beginIntent(pending);
+    await writeFile(target, "after\n");
+    await first.recoverIntents();
+
+    const results = await Promise.allSettled([
+      first.reviewRecoveredChangeSet(pending.changeSetId),
+      second.undo(pending.id),
+    ]);
+
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    expect(firstLedger.get(pending.id)?.status).toBe("undone");
+    expect(await readFile(target, "utf8")).toBe("before\n");
+    firstLedger.close();
+    secondLedger.close();
   });
 
   it("uses summaries instead of displaying binary or large recovered files", async () => {
@@ -346,9 +386,47 @@ describe("SnapshotStore limits", () => {
     await expect(snapshots.capture(different)).rejects.toThrow("quota exceeded");
     expect(firstSnapshot.kind).toBe("file");
     if (firstSnapshot.kind !== "file") throw new Error("Expected file snapshot");
-    expect(await snapshots.garbageCollect(new Set([firstSnapshot.blob]))).toBe(0);
-    expect(await snapshots.garbageCollect(new Set())).toBe(1);
+    expect(await snapshots.garbageCollect(new Set([firstSnapshot.blob]), 0)).toBe(0);
+    expect(await snapshots.garbageCollect(new Set())).toBe(0);
+    expect(await snapshots.garbageCollect(new Set(), 0)).toBe(1);
     await expect(snapshots.capture(different)).resolves.toMatchObject({ kind: "file" });
+  });
+
+  it("serializes quota checks for concurrent new blobs", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-quota-race-"));
+    temporaryDirectories.push(directory);
+    const snapshots = new SnapshotStore(path.join(directory, "blobs"), {
+      maxFileBytes: 10,
+      maxTotalBytes: 5,
+    });
+    await snapshots.initialize();
+    const first = path.join(directory, "first.txt");
+    const second = path.join(directory, "second.txt");
+    await writeFile(first, "one");
+    await writeFile(second, "two");
+
+    const results = await Promise.allSettled([snapshots.capture(first), snapshots.capture(second)]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+  });
+
+  it("refreshes a reused blob's grace period before garbage collection", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-gc-grace-"));
+    temporaryDirectories.push(directory);
+    const snapshots = new SnapshotStore(path.join(directory, "blobs"));
+    await snapshots.initialize();
+    const target = path.join(directory, "pending.txt");
+    await writeFile(target, "pending approval\n");
+    const snapshot = await snapshots.capture(target);
+    if (snapshot.kind !== "file") throw new Error("Expected file snapshot");
+    const blob = path.join(directory, "blobs", snapshot.blob);
+    const old = new Date(Date.now() - 10 * 60 * 1_000);
+    await utimes(blob, old, old);
+
+    await snapshots.capture(target);
+
+    expect(await snapshots.garbageCollect(new Set(), 5 * 60 * 1_000)).toBe(0);
   });
 });
 

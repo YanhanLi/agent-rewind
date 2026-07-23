@@ -8,6 +8,7 @@ import type {
   RecoveryPreview,
 } from "./model.js";
 import { Ledger } from "./ledger.js";
+import type { OperationLock } from "./operation-lock.js";
 import { RewindConflictError, SnapshotStore } from "./snapshot-store.js";
 
 export class RewindService {
@@ -16,6 +17,7 @@ export class RewindService {
   constructor(
     private readonly ledger: Ledger,
     private readonly snapshots: SnapshotStore,
+    private readonly operationLock: OperationLock = { run: (operation) => operation() },
   ) {}
 
   list(): ChangeRecord[] {
@@ -31,6 +33,14 @@ export class RewindService {
   }
 
   async recoverIntents(): Promise<{ recovered: number; discarded: number; pending: number }> {
+    return this.operationLock.run(() => this.recoverIntentsLocked());
+  }
+
+  private async recoverIntentsLocked(): Promise<{
+    recovered: number;
+    discarded: number;
+    pending: number;
+  }> {
     let recovered = 0;
     let discarded = 0;
     let pending = 0;
@@ -71,7 +81,11 @@ export class RewindService {
     return { recovered, discarded, pending };
   }
 
-  reviewRecoveredChangeSet(id: string): ChangeSetView {
+  async reviewRecoveredChangeSet(id: string): Promise<ChangeSetView> {
+    return this.operationLock.run(() => this.reviewRecoveredChangeSetLocked(id));
+  }
+
+  private async reviewRecoveredChangeSetLocked(id: string): Promise<ChangeSetView> {
     const existing = this.ledger.getChangeSet(id);
     if (!existing) throw new Error(`Unknown change set: ${id}`);
     if (!existing.recoveryStatus) {
@@ -111,6 +125,10 @@ export class RewindService {
   }
 
   async undoChangeSet(id: string): Promise<ChangeSetView> {
+    return this.operationLock.run(() => this.undoChangeSetLocked(id));
+  }
+
+  private async undoChangeSetLocked(id: string): Promise<ChangeSetView> {
     this.ledger.recordEvent({ type: "undo_started", target: "change_set" });
     try {
       const records = this.ledger.listByChangeSet(id);
@@ -153,6 +171,10 @@ export class RewindService {
   }
 
   async undo(id: string): Promise<ChangeRecord> {
+    return this.operationLock.run(() => this.undoLocked(id));
+  }
+
+  private async undoLocked(id: string): Promise<ChangeRecord> {
     this.ledger.recordEvent({ type: "undo_started", target: "change" });
     const record = this.ledger.get(id);
     if (!record) throw new Error(`Unknown change: ${id}`);

@@ -293,6 +293,136 @@ it("serializes concurrent approved writes against the same captured state", asyn
   }
 }, 20_000);
 
+it("serializes approved writes across independent MCP processes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-process-race-root-"));
+  const data = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-process-race-data-"));
+  directories.push(root, data);
+  const target = path.join(root, "shared.txt");
+  await writeFile(target, "original\n");
+  const firstPort = 36_100 + Math.floor(Math.random() * 100);
+  const secondPort = firstPort + 200;
+  const firstToken = "first-process-token";
+  const secondToken = "second-process-token";
+  const firstTransport = proxyTransport(root, data, firstToken, firstPort);
+  const secondTransport = proxyTransport(root, data, secondToken, secondPort);
+  const firstClient = new Client({ name: "first-process", version: "1.0.0" });
+  const secondClient = new Client({ name: "second-process", version: "1.0.0" });
+
+  try {
+    await Promise.all([firstClient.connect(firstTransport), secondClient.connect(secondTransport)]);
+    const firstCall = firstClient.callTool({
+      name: "write_file",
+      arguments: { path: target, content: "first process\n" },
+    });
+    const secondCall = secondClient.callTool({
+      name: "write_file",
+      arguments: { path: target, content: "second process\n" },
+    });
+    const [firstPending, secondPending] = await Promise.all([
+      waitForPending(firstPort, firstToken),
+      waitForPending(secondPort, secondToken),
+    ]);
+    await Promise.all([
+      post(firstPort, firstToken, `/api/approvals/${firstPending.pending[0].id}/approve`),
+      post(secondPort, secondToken, `/api/approvals/${secondPending.pending[0].id}/approve`),
+    ]);
+
+    const results = await Promise.all([firstCall, secondCall]);
+    expect(results.filter((result) => result.isError === true)).toHaveLength(1);
+    expect(["first process\n", "second process\n"]).toContain(await readFile(target, "utf8"));
+
+    const state = await stateFor(firstPort, firstToken);
+    expect(state.changes).toHaveLength(1);
+    expect(state.changeSets).toHaveLength(1);
+    await post(firstPort, firstToken, `/api/change-sets/${state.changeSets[0].id}/undo`);
+    expect(await readFile(target, "utf8")).toBe("original\n");
+  } finally {
+    await Promise.allSettled([firstTransport.close(), secondTransport.close()]);
+  }
+}, 20_000);
+
+it("does not reconcile another live process's in-flight intent", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-live-intent-root-"));
+  const data = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-live-intent-data-"));
+  directories.push(root, data);
+  const target = path.join(root, "in-flight.txt");
+  await writeFile(target, "before\n");
+  const firstPort = 36_500 + Math.floor(Math.random() * 100);
+  const secondPort = firstPort + 200;
+  const firstToken = "live-intent-first-token";
+  const secondToken = "live-intent-second-token";
+  const firstTransport = proxyTransport(root, data, firstToken, firstPort, {
+    AGENT_REWIND_TEST_DELAY_AFTER_INTENT_MS: "750",
+  });
+  const secondTransport = proxyTransport(root, data, secondToken, secondPort);
+  const firstClient = new Client({ name: "live-intent-first", version: "1.0.0" });
+  const secondClient = new Client({ name: "live-intent-second", version: "1.0.0" });
+
+  try {
+    await firstClient.connect(firstTransport);
+    const call = firstClient.callTool({
+      name: "write_file",
+      arguments: { path: target, content: "after\n" },
+    });
+    const pending = await waitForPending(firstPort, firstToken);
+    await post(firstPort, firstToken, `/api/approvals/${pending.pending[0].id}/approve`);
+    await waitForIntent(data);
+
+    const secondConnected = secondClient.connect(secondTransport);
+    const result = await call;
+    expect(result.isError).not.toBe(true);
+    await secondConnected;
+
+    const state = await stateFor(secondPort, secondToken);
+    expect(state.changes).toHaveLength(1);
+    expect(state.recovered).toHaveLength(0);
+    const ledger = new Ledger(path.join(data, "ledger.sqlite"));
+    expect(ledger.listIntents()).toHaveLength(0);
+    ledger.close();
+  } finally {
+    await Promise.allSettled([firstTransport.close(), secondTransport.close()]);
+  }
+}, 20_000);
+
+it("revalidates root containment after approval", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-revalidate-root-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-revalidate-outside-"));
+  const data = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-revalidate-data-"));
+  directories.push(root, outside, data);
+  const parent = path.join(root, "replaceable");
+  await mkdir(parent);
+  const target = path.join(parent, "escaped.txt");
+  const port = 36_900 + Math.floor(Math.random() * 100);
+  const token = "root-revalidation-token";
+  const transport = proxyTransport(root, data, token, port);
+  const client = new Client({ name: "root-revalidation", version: "1.0.0" });
+
+  try {
+    await client.connect(transport);
+    const call = client.callTool({
+      name: "write_file",
+      arguments: { path: target, content: "must stay inside\n" },
+    });
+    const pending = await waitForPending(port, token);
+    await rm(parent, { recursive: true });
+    await symlink(outside, parent);
+    await post(port, token, `/api/approvals/${pending.pending[0].id}/approve`);
+
+    const result = await call;
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "text", text: expect.stringContaining("outside") }),
+      ]),
+    );
+    await expect(readFile(path.join(outside, "escaped.txt"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  } finally {
+    await transport.close();
+  }
+}, 20_000);
+
 function proxyTransport(
   root: string,
   data: string,
@@ -312,6 +442,18 @@ function proxyTransport(
     } as Record<string, string>,
     stderr: "pipe",
   });
+}
+
+async function waitForIntent(data: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const ledger = new Ledger(path.join(data, "ledger.sqlite"));
+    const count = ledger.listIntents().length;
+    ledger.close();
+    if (count > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for an in-flight intent");
 }
 
 interface UiState {

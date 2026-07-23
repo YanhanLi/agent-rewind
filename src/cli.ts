@@ -26,6 +26,7 @@ import {
 } from "./codex-guard.js";
 import { runDemo } from "./demo.js";
 import { Ledger } from "./ledger.js";
+import { SqliteOperationLock } from "./operation-lock.js";
 import type { ValidationReport } from "./model.js";
 import {
   buildOpenCodeConfigFragment,
@@ -45,7 +46,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.18.0\n");
+    process.stdout.write("agent-rewind 0.19.0\n");
     return;
   }
   if (process.argv[2] === "report") {
@@ -79,17 +80,24 @@ async function main(): Promise<void> {
   const parsed = parseArguments(process.argv.slice(2));
   const dataDirectory = getDataDirectory();
   await mkdir(dataDirectory, { recursive: true });
+  const operationLock = new SqliteOperationLock(path.join(dataDirectory, "operation-lock.sqlite"));
   const snapshots = new SnapshotStore(path.join(dataDirectory, "blobs"), {
     maxFileBytes: megabytesFromEnvironment("AGENT_REWIND_MAX_FILE_MB", 16),
     maxTotalBytes: megabytesFromEnvironment("AGENT_REWIND_MAX_TOTAL_MB", 1024),
   });
-  await snapshots.initialize();
-  const ledger = new Ledger(path.join(dataDirectory, "ledger.sqlite"));
   const retentionDays = positiveNumberFromEnvironment("AGENT_REWIND_RETENTION_DAYS", 7);
-  ledger.pruneBefore(new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000));
-  const rewind = new RewindService(ledger, snapshots);
+  const ledger = await operationLock.run(async () => {
+    await snapshots.initialize();
+    const result = new Ledger(path.join(dataDirectory, "ledger.sqlite"));
+    result.pruneBefore(new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000));
+    return result;
+  });
+  const rewind = new RewindService(ledger, snapshots, operationLock);
   const recovery = await rewind.recoverIntents();
-  await snapshots.garbageCollect(ledger.referencedBlobs());
+  const approvalTimeoutMs = millisecondsFromEnvironment("AGENT_REWIND_APPROVAL_TIMEOUT_MS", 120_000);
+  await operationLock.run(() =>
+    snapshots.garbageCollect(ledger.referencedBlobs(), approvalTimeoutMs + 60_000),
+  );
   if (recovery.recovered > 0 || recovery.discarded > 0 || recovery.pending > 0) {
     process.stderr.write(
       `Agent Rewind recovery: ${recovery.recovered} recovered, ${recovery.discarded} unchanged, ${recovery.pending} pending.\n`,
@@ -98,7 +106,7 @@ async function main(): Promise<void> {
   const approval = new ApprovalServer(
     rewind,
     parsed.port,
-    millisecondsFromEnvironment("AGENT_REWIND_APPROVAL_TIMEOUT_MS", 120_000),
+    approvalTimeoutMs,
   );
   const shutdown = shutdownSignal();
   let closeProxy: (() => Promise<void>) | undefined;
@@ -109,6 +117,7 @@ async function main(): Promise<void> {
       approval,
       snapshots,
       ledger,
+      operationLock,
       changeSetWindowMs: millisecondsFromEnvironment("AGENT_REWIND_CHANGE_SET_WINDOW_MS", 30_000),
     });
     await shutdown.wait;
@@ -322,7 +331,9 @@ async function report(args: string[]): Promise<void> {
   }
   const dataDirectory = getDataDirectory();
   await mkdir(dataDirectory, { recursive: true });
-  const result = new Ledger(path.join(dataDirectory, "ledger.sqlite")).validationReport();
+  const ledger = new Ledger(path.join(dataDirectory, "ledger.sqlite"));
+  const result = ledger.validationReport();
+  ledger.close();
   process.stdout.write(
     args.includes("--json") ? `${JSON.stringify(result, null, 2)}\n` : formatReport(result),
   );
