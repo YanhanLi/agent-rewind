@@ -44,6 +44,13 @@ export interface ChangeSetView {
   changes: ChangeRecord[];
 }
 
+export interface ChangeSetPreview extends Omit<ChangeSetView, "affectedPaths" | "changes"> {
+  affectedPathCount: number;
+  affectedPaths: string[];
+  changes: ChangeRecord[];
+  detailsTruncated: boolean;
+}
+
 export interface RecoveryPreview {
   path: string;
   kind: "text" | "summary";

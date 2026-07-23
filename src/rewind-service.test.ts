@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, u
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Ledger } from "./ledger.js";
 import type { ChangeIntent, ChangeRecord } from "./model.js";
 import { SqliteOperationLock } from "./operation-lock.js";
@@ -811,7 +811,16 @@ describe("Ledger compatibility", () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-ledger-"));
     temporaryDirectories.push(directory);
     const filename = path.join(directory, "ledger.sqlite");
-    const legacy = change("write_file", []);
+    const legacyPath = path.join(directory, "legacy.txt");
+    const legacy = change("write_file", [
+      {
+        path: legacyPath,
+        before: { kind: "missing", hash: "legacy-before" },
+        after: { kind: "missing", hash: "legacy-after" },
+      },
+    ]);
+    legacy.changeSetLabel = "Migrated task";
+    legacy.recoveredAt = "2026-07-23T09:00:00.000Z";
     const { changeSetId: _changeSetId, ...payload } = legacy;
     const database = new DatabaseSync(filename);
     database.exec(`
@@ -829,6 +838,7 @@ describe("Ledger compatibility", () => {
     const ledger = new Ledger(filename);
 
     const sets = ledger.listChangeSets();
+    const previews = ledger.listChangeSetPreviews();
     const migrated = new DatabaseSync(filename);
     const columns = migrated.prepare("PRAGMA table_info(changes)").all() as Array<{
       name: string;
@@ -839,6 +849,9 @@ describe("Ledger compatibility", () => {
     const indexes = migrated.prepare("PRAGMA index_list(changes)").all() as Array<{
       name: string;
     }>;
+    const pathRow = migrated
+      .prepare("SELECT path FROM change_set_paths WHERE change_set_id = ?")
+      .get(legacy.id) as { path: string };
     const queryPlan = migrated
       .prepare(
         `EXPLAIN QUERY PLAN
@@ -852,32 +865,184 @@ describe("Ledger compatibility", () => {
     expect(sets).toHaveLength(1);
     expect(sets[0].id).toBe(legacy.id);
     expect(sets[0].actionCount).toBe(1);
+    expect(previews[0]).toMatchObject({
+      label: "Migrated task",
+      recoveryStatus: "pending",
+      affectedPathCount: 1,
+      affectedPaths: [legacyPath],
+    });
     expect(columns.map((column) => column.name)).toContain("change_set_id");
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["change_set_label", "recovered_at", "reviewed_at"]),
+    );
     expect(row.change_set_id).toBe(legacy.id);
+    expect(pathRow.path).toBe(legacyPath);
     expect(indexes.map((index) => index.name)).toContain("changes_change_set_created_at");
     expect(queryPlan.some(({ detail }) => detail.includes("changes_change_set_created_at"))).toBe(
       true,
     );
   });
 
-  it("returns every action in a change set larger than the old history cap", async () => {
+  it("retains full details while materializing only bounded history previews", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-large-set-"));
     temporaryDirectories.push(directory);
     const ledger = new Ledger(path.join(directory, "ledger.sqlite"));
     const changeSetId = randomUUID();
     const start = Date.now() - 1_000;
     for (let index = 0; index < 501; index += 1) {
-      const record = change("write_file", [], changeSetId);
+      const record = change(
+        "write_file",
+        [
+          {
+            path: path.join(directory, `file-${index}.txt`),
+            before: { kind: "missing", hash: `before-${index}` },
+            after: { kind: "missing", hash: `after-${index}` },
+          },
+        ],
+        changeSetId,
+      );
       record.createdAt = new Date(start + index).toISOString();
       ledger.add(record);
     }
 
+    const parse = vi.spyOn(JSON, "parse");
+    let previews: ReturnType<Ledger["listChangeSetPreviews"]>;
+    let parseCount = 0;
+    try {
+      previews = ledger.listChangeSetPreviews();
+      parseCount = parse.mock.calls.length;
+    } finally {
+      parse.mockRestore();
+    }
     const sets = ledger.listChangeSets();
 
+    expect(parseCount).toBe(5);
+    expect(previews!).toHaveLength(1);
+    expect(previews![0]).toMatchObject({
+      id: changeSetId,
+      actionCount: 501,
+      affectedPathCount: 501,
+      detailsTruncated: true,
+    });
+    expect(previews![0].changes).toHaveLength(5);
+    expect(previews![0].affectedPaths).toHaveLength(5);
     expect(sets).toHaveLength(1);
     expect(sets[0].id).toBe(changeSetId);
     expect(sets[0].actionCount).toBe(501);
     expect(sets[0].changes).toHaveLength(501);
+  });
+
+  it("keeps preview aggregation consistent with complete change-set details", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-preview-set-"));
+    temporaryDirectories.push(directory);
+    const ledger = new Ledger(path.join(directory, "ledger.sqlite"));
+    const changeSetId = randomUUID();
+    const sharedPath = path.join(directory, "shared.txt");
+    const first = change(
+      "write_file",
+      [
+        {
+          path: sharedPath,
+          before: { kind: "missing", hash: "first-before" },
+          after: { kind: "missing", hash: "first-after" },
+        },
+      ],
+      changeSetId,
+    );
+    first.changeSetLabel = "Preview parity";
+    first.recoveredAt = "2026-07-23T10:00:00.000Z";
+    first.createdAt = "2026-07-23T10:00:00.000Z";
+    const second = change(
+      "edit_file",
+      [
+        {
+          path: sharedPath,
+          before: { kind: "missing", hash: "second-before" },
+          after: { kind: "missing", hash: "second-after" },
+        },
+        {
+          path: path.join(directory, "other.txt"),
+          before: { kind: "missing", hash: "other-before" },
+          after: { kind: "missing", hash: "other-after" },
+        },
+      ],
+      changeSetId,
+    );
+    second.status = "conflict";
+    second.createdAt = "2026-07-23T10:00:01.000Z";
+    ledger.add(first);
+    ledger.add(second);
+
+    const full = ledger.getChangeSet(changeSetId)!;
+    const preview = ledger.listChangeSetPreviews()[0];
+
+    expect(preview).toMatchObject({
+      id: full.id,
+      label: full.label,
+      createdAt: full.createdAt,
+      updatedAt: full.updatedAt,
+      status: full.status,
+      recoveryStatus: full.recoveryStatus,
+      actionCount: full.actionCount,
+      affectedPathCount: full.affectedPaths.length,
+      affectedPaths: full.affectedPaths,
+      detailsTruncated: false,
+    });
+
+    first.reviewedAt = "2026-07-23T10:00:02.000Z";
+    ledger.update(first);
+    expect(ledger.listChangeSetPreviews()[0].recoveryStatus).toBe("reviewed");
+    expect(() => ledger.update({ ...first, changeSetId: randomUUID() })).toThrow(
+      "cannot change a record's change set",
+    );
+  });
+
+  it("rebuilds path summaries when retention removes the first occurrence", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-prune-paths-"));
+    temporaryDirectories.push(directory);
+    const filename = path.join(directory, "ledger.sqlite");
+    const ledger = new Ledger(filename);
+    const changeSetId = randomUUID();
+    const sharedPath = path.join(directory, "shared.txt");
+    const oldOnlyPath = path.join(directory, "old.txt");
+    const newOnlyPath = path.join(directory, "new.txt");
+    const oldRecord = change(
+      "write_file",
+      [sharedPath, oldOnlyPath].map((target) => ({
+        path: target,
+        before: { kind: "missing" as const, hash: `before-${target}` },
+        after: { kind: "missing" as const, hash: `after-${target}` },
+      })),
+      changeSetId,
+    );
+    oldRecord.createdAt = "2026-07-22T10:00:00.000Z";
+    const newRecord = change(
+      "edit_file",
+      [sharedPath, newOnlyPath].map((target) => ({
+        path: target,
+        before: { kind: "missing" as const, hash: `before-new-${target}` },
+        after: { kind: "missing" as const, hash: `after-new-${target}` },
+      })),
+      changeSetId,
+    );
+    newRecord.createdAt = "2026-07-23T10:00:00.000Z";
+    ledger.add(oldRecord);
+    ledger.add(newRecord);
+
+    expect(ledger.pruneBefore(new Date("2026-07-23T00:00:00.000Z"))).toBe(1);
+
+    const preview = ledger.listChangeSetPreviews()[0];
+    const database = new DatabaseSync(filename);
+    const mappedPaths = database
+      .prepare("SELECT path FROM change_paths ORDER BY position")
+      .all() as Array<{ path: string }>;
+    database.close();
+    expect(preview).toMatchObject({
+      actionCount: 1,
+      affectedPathCount: 2,
+      affectedPaths: [sharedPath, newOnlyPath],
+    });
+    expect(mappedPaths.map(({ path: target }) => target)).toEqual([sharedPath, newOnlyPath]);
   });
 
   it("aggregates validation events without path or content columns", async () => {

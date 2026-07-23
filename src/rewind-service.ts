@@ -1,6 +1,7 @@
 import { createTwoFilesPatch } from "diff";
 import type {
   ChangeRecord,
+  ChangeSetPreview,
   ChangeSetView,
   EntryState,
   LocalEvent,
@@ -29,8 +30,8 @@ export class RewindService {
     return this.ledger.list();
   }
 
-  listChangeSets(): ChangeSetView[] {
-    return this.ledger.listChangeSets();
+  listChangeSets(): ChangeSetPreview[] {
+    return this.ledger.listChangeSetPreviews();
   }
 
   getChangeSet(id: string): ChangeSetView | undefined {

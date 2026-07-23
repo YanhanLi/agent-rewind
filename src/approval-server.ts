@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { ChangeRecord, ChangeSetView, PendingApproval } from "./model.js";
+import type { ChangeRecord, ChangeSetPreview, ChangeSetView, PendingApproval } from "./model.js";
 import type { RewindService } from "./rewind-service.js";
 import { RewindConflictError, SnapshotIntegrityError } from "./snapshot-store.js";
 
@@ -269,7 +269,7 @@ function publicChange(record: ChangeRecord) {
   };
 }
 
-function publicChangeSet(changeSet: ChangeSetView, preview = true) {
+function publicChangeSet(changeSet: ChangeSetPreview | ChangeSetView, preview = true) {
   const affectedPaths = preview
     ? changeSet.affectedPaths.slice(0, HISTORY_PATH_PREVIEW_LIMIT)
     : changeSet.affectedPaths;
@@ -284,11 +284,17 @@ function publicChangeSet(changeSet: ChangeSetView, preview = true) {
     status: changeSet.status,
     recoveryStatus: changeSet.recoveryStatus,
     actionCount: changeSet.actionCount,
-    affectedPathCount: changeSet.affectedPaths.length,
+    affectedPathCount:
+      preview && "affectedPathCount" in changeSet
+        ? changeSet.affectedPathCount
+        : changeSet.affectedPaths.length,
     affectedPaths,
     changes: changes.map(publicChange),
     detailsTruncated:
-      affectedPaths.length < changeSet.affectedPaths.length || changes.length < changeSet.changes.length,
+      preview && "detailsTruncated" in changeSet
+        ? changeSet.detailsTruncated
+        : affectedPaths.length < changeSet.affectedPaths.length ||
+          changes.length < changeSet.changes.length,
   };
 }
 
