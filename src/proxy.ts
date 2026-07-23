@@ -39,7 +39,7 @@ interface ProxyOptions {
 }
 
 export async function startProxy(options: ProxyOptions): Promise<() => Promise<void>> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.17.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.18.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const mutationQueue = new SerialQueue();
   const require = createRequire(import.meta.url);
@@ -53,7 +53,7 @@ export async function startProxy(options: ProxyOptions): Promise<() => Promise<v
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.17.0" },
+    { name: "agent-rewind", version: "0.18.0" },
     { capabilities: { tools: {} } },
   );
 

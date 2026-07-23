@@ -162,6 +162,8 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - 单文件快照默认上限为 16 MiB，总存储上限为 1 GiB，记录默认保留 7 天。
 - 当前是单机、单用户工具，不应作为网络服务暴露。
 
+依赖审计的已知告警、实际可达性和复核命令见 [依赖安全说明](docs/DEPENDENCY_SECURITY.md)。项目不使用只在本仓库生效、却无法传递给 npm 使用者的 `overrides` 来制造本地零告警结果。
+
 可通过环境变量调整测试参数：
 
 ```bash
@@ -221,6 +223,7 @@ git clone https://github.com/YanhanLi/agent-rewind.git
 cd agent-rewind
 npm install
 npm run check
+npm run audit:high
 ```
 
 The project is licensed under the [MIT License](LICENSE).
