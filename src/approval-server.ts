@@ -124,17 +124,19 @@ export class ApprovalServer {
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     response.setHeader("Content-Type", "application/json; charset=utf-8");
+    setSecurityHeaders(response);
     try {
       const requestUrl = new URL(request.url ?? "/", `http://127.0.0.1:${this.activePort}`);
       if (request.method === "GET" && requestUrl.pathname === "/") {
-        if (requestUrl.searchParams.get("token") !== this.token) return this.unauthorized(response);
+        const presentedToken = requestUrl.searchParams.get("token");
+        if (presentedToken !== null && presentedToken !== this.token) {
+          return this.unauthorized(response);
+        }
         response.setHeader("Content-Type", "text/html; charset=utf-8");
-        response.setHeader("Cache-Control", "no-store");
-        response.end(page(this.token));
+        response.end(page(presentedToken === this.token ? this.token : undefined));
         return;
       }
       if (!this.authorized(request)) return this.unauthorized(response);
-      if (request.method === "GET") response.setHeader("Cache-Control", "no-store");
       if (request.method === "GET" && requestUrl.pathname === "/api/state") {
         this.lastHeartbeat = Date.now();
         const changeSets = this.rewind.listChangeSets();
@@ -343,14 +345,14 @@ function publicApiError(error: unknown): {
   };
 }
 
-function page(token: string): string {
+function page(token?: string): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
 <title>Agent Rewind</title><style>
 :root{font-family:ui-sans-serif,system-ui;color:#171717;background:#f5f5f4}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}header{background:#171717;color:white;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}h1{font-size:18px;margin:0;letter-spacing:0;white-space:nowrap}main{width:100%;max-width:920px;margin:28px auto;padding:0 18px}h2{font-size:14px;text-transform:uppercase;color:#666;margin:26px 0 10px}.feedback{display:none;margin:0 0 18px;color:#991b1b;background:#fef2f2;border-left:3px solid #dc2626;padding:11px 12px;font-size:13px;line-height:1.45;overflow-wrap:anywhere}.feedback.visible{display:block}.item{width:100%;background:white;border:1px solid #ddd;border-radius:6px;padding:16px;margin:10px 0;min-width:0}.recovered{border-color:#d97706}.notice{margin:12px 0;color:#7c2d12;background:#fffbeb;border-left:3px solid #d97706;padding:10px 12px;font-size:13px;line-height:1.45}.readiness{margin:12px 0 0;border-left:3px solid #a3a3a3;padding:8px 10px;color:#525252;background:#fafafa;font-size:12px;line-height:1.45;overflow-wrap:anywhere}.readiness.ready{border-color:#15803d;color:#166534;background:#f0fdf4}.readiness.conflict{border-color:#dc2626;color:#991b1b;background:#fef2f2}.readiness.snapshot_integrity{border-color:#d97706;color:#92400e;background:#fffbeb}.preview{margin-top:12px}.preview pre{margin:6px 0 0;background:#fafafa;white-space:pre;overflow-wrap:normal}.row{display:flex;gap:10px;align-items:center;justify-content:space-between;min-width:0}.row>div{min-width:0}.row>div:last-child{display:flex;gap:5px;flex:none}.summary{max-width:100%;font-weight:650;overflow-wrap:anywhere}.meta{max-width:100%;font:12px ui-monospace,monospace;color:#777;margin-top:5px;overflow-wrap:anywhere}.actions{margin-top:12px;border-top:1px solid #e7e5e4}.action{padding:9px 0;border-bottom:1px solid #eee;font-size:13px;overflow-wrap:anywhere}.action:last-child{border-bottom:0}.paths{margin-top:8px;color:#555;font-size:12px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f4;border:1px solid #e7e5e4;padding:12px;font-size:12px;max-height:300px;max-width:100%;overflow:auto}button{border:0;border-radius:5px;padding:8px 13px;min-height:32px;font-weight:650;cursor:pointer;white-space:nowrap}button:disabled{cursor:wait;opacity:.55}.approve,.keep{background:#15803d;color:white}.reject{background:#dc2626;color:white}.undo{background:#171717;color:white}.empty{color:#777;padding:22px 0}.status{font-size:12px;padding:3px 7px;background:#eee;border-radius:4px}.recovery-status{background:#fef3c7;color:#92400e}@media(max-width:600px){header{padding:16px 18px}header span{display:none}main{margin:18px 0;padding:0 12px;max-width:100vw}.item{padding:16px;max-width:calc(100vw - 24px);overflow:hidden}.row{width:100%;max-width:100%;align-items:stretch;flex-direction:column;overflow:hidden}.row>div:first-child{width:100%;max-width:100%}.summary{word-break:break-all}.row>div:last-child{width:100%;max-width:100%;display:grid;grid-template-columns:minmax(0,1fr);margin-top:4px}.row button{padding:8px 6px;font-size:12px;width:100%;white-space:normal;overflow-wrap:anywhere}}
 </style></head><body><header><h1>Agent Rewind</h1><span>Local approval and recovery</span></header><main><div id="feedback" class="feedback" role="status" aria-live="polite"></div><h2>Waiting for approval</h2><div id="pending"></div><h2>Recovered changes</h2><div id="recovered"></div><h2>Change history</h2><div id="history"></div></main><script>
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const token=${JSON.stringify(token)};const headers={'X-Agent-Rewind-Token':token};
+const bootstrapToken=${JSON.stringify(token ?? null)};if(bootstrapToken){sessionStorage.setItem('agent-rewind-token',bootstrapToken);history.replaceState(null,'',location.pathname)}const token=bootstrapToken||sessionStorage.getItem('agent-rewind-token')||'';const headers={'X-Agent-Rewind-Token':token};
 const previewCache=new Map();const readinessCache=new Map();const detailsCache=new Map();let actionInFlight=false;
 const pathCount=x=>x.affectedPathCount??x.affectedPaths.length;const countSummary=x=>x.actionCount+' action'+(x.actionCount===1?'':'s')+' across '+pathCount(x)+' path'+(pathCount(x)===1?'':'s');
 const setTitle=x=>x.label?esc(x.label):countSummary(x);const setMeta=x=>(x.label?countSummary(x)+' · ':'')+new Date(x.createdAt).toLocaleString()+' · change set '+esc(x.id.slice(0,8));
@@ -366,6 +368,20 @@ const undoControls=x=>canUndo(x)?\`<button data-set-id="\${esc(x.id)}" data-stat
 const historyCard=x=>\`<div class="item"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status">\${esc(x.status)}</span> \${undoControls(x)}</div></div>\${canUndo(x)?readiness(x):''}\${actions(x)}</div>\`;
 const recoveredCard=x=>{const previews=previewCache.get(x.id);return \`<div class="item recovered"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status recovery-status">needs review</span>\${undoControls(x)}<button class="keep" data-set-id="\${esc(x.id)}" onclick="postSet(this,'review')">Keep changes</button></div></div><div class="notice">Agent Rewind found this change after an interrupted operation. Review the snapshot-backed evidence before keeping or undoing it.</div>\${canUndo(x)?readiness(x):''}\${previews?previews.map(p=>\`<div class="preview"><div class="meta">\${esc(p.path)} · \${esc(p.kind)}</div><pre>\${esc(p.detail)}</pre></div>\`).join(''):'<div class="meta">Loading snapshot evidence...</div>'}\${actions(x)}</div>\`};
 async function renderRecovered(items){document.querySelector('#recovered').innerHTML=items.length?items.map(recoveredCard).join(''):'<div class="empty">No interrupted changes need review.</div>';syncBusy();await Promise.all(items.filter(x=>!previewCache.has(x.id)).map(async x=>{try{const r=await fetch('/api/change-sets/'+encodeURIComponent(x.id)+'/recovery-preview',{headers});if(r.ok)previewCache.set(x.id,(await r.json()).previews)}catch{}}));document.querySelector('#recovered').innerHTML=items.length?items.map(recoveredCard).join(''):'<div class="empty">No interrupted changes need review.</div>';syncBusy()}
-async function refresh(){let r;try{r=await fetch('/api/state',{headers})}catch{return}if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}\${x.changeSetLabel?' · '+esc(x.changeSetLabel):''}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject',this)">Reject</button> \${x.changeSetId?\`<button onclick="post('/api/approvals/\${x.id}/approve-set',this)">Allow set</button>\`:''} <button onclick="post('/api/approvals/\${x.id}/approve-session',this)">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve',this)">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';syncBusy();await renderRecovered(s.recovered);const history=s.changeSets.filter(x=>x.recoveryStatus!=='pending');document.querySelector('#history').innerHTML=history.length?history.map(historyCard).join(''):'<div class="empty">No recorded changes yet.</div>';syncBusy()}refresh();setInterval(refresh,1000);
+async function refresh(){let r;try{r=await fetch('/api/state',{headers})}catch{return}if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}\${x.changeSetLabel?' · '+esc(x.changeSetLabel):''}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject',this)">Reject</button> \${x.changeSetId?\`<button onclick="post('/api/approvals/\${x.id}/approve-set',this)">Allow set</button>\`:''} <button onclick="post('/api/approvals/\${x.id}/approve-session',this)">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve',this)">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';syncBusy();await renderRecovered(s.recovered);const history=s.changeSets.filter(x=>x.recoveryStatus!=='pending');document.querySelector('#history').innerHTML=history.length?history.map(historyCard).join(''):'<div class="empty">No recorded changes yet.</div>';syncBusy()}if(token){refresh();setInterval(refresh,1000)}else{showError('This page has no active Agent Rewind session. Open it from the current Agent Rewind process.')}
 </script></body></html>`;
+}
+
+function setSecurityHeaders(response: ServerResponse): void {
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader(
+    "Content-Security-Policy",
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  );
+  response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "DENY");
 }

@@ -160,7 +160,7 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - 只有经过这个 MCP Server 的操作才可见，Claude、OpenCode、Codex 或其他客户端的内置文件工具不在覆盖范围内。
 - 可选 OpenCode guard 会阻断内置 `edit`、`write` 和 `apply_patch`；可选 Codex guard 会阻断 `apply_patch`。guard 不会自动安装，也不会修改 OpenCode 全局 permission。
 - shell 命令、第三方插件和绕过平台标准 hook 的工具仍可能直接写文件。Guard 模式是路由约束，不是操作系统级强制边界。
-- 本地 API 使用随机能力令牌和 Origin 校验，审批默认在两分钟后失效。
+- 本地 API 使用随机能力令牌和 Origin 校验，审批默认在两分钟后失效。首次授权页会把 URL 中的令牌转入当前端口的 `sessionStorage` 并立即清理地址栏；刷新继续使用同一浏览器会话，裸页面不会读取历史。页面与 API 响应同时设置 CSP、禁止 framing、`no-referrer`、`nosniff` 和 `no-store`。
 - 恢复 diff 仅通过带能力令牌的 localhost 审批页提供，不写入最小化事件表；它仍可能包含本地文件内容，分享页面截图前应自行检查。
 - 符号链接和特殊文件会被快照层拒绝。
 - `rewind_delete_directory` 不能删除配置根目录；目录内任何条目无法完整快照时，删除不会开始。
@@ -212,6 +212,8 @@ Key properties:
 - transactionally migrated, indexed change-set history without per-set action truncation;
 - bounded five-item history previews with exact counts and on-demand complete details;
 - `Cache-Control: no-store` on authenticated local history and recovery responses;
+- capability-token URL cleanup with session-scoped reload support and an unauthenticated empty shell;
+- CSP, frame denial, no-referrer, nosniff, and same-origin browser isolation headers;
 - SHA-256 verification of snapshot blobs and staged atomic file/directory restoration;
 - bounded change-set snapshot preflight and actionable conflict/integrity feedback in the approval UI;
 - on-demand, timestamped undo-readiness checks, including resumable partial change sets;

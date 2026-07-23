@@ -241,12 +241,28 @@ describe("ApprovalServer", () => {
       `http://127.0.0.1:${approval.port}/?token=public-history-test-token`,
     );
     const pageBody = await pageResponse.text();
+    const anonymousResponse = await fetch(`http://127.0.0.1:${approval.port}/`);
+    const anonymousBody = await anonymousResponse.text();
+    const invalidResponse = await fetch(
+      `http://127.0.0.1:${approval.port}/?token=invalid-history-token`,
+    );
     const script = pageBody.match(/<script>([\s\S]*)<\/script>/)?.[1];
     expect(script).toBeDefined();
     expect(() => new Script(script!)).not.toThrow();
     expect(pageBody).toContain('id="feedback"');
     expect(script).toContain("button.disabled=true");
+    expect(script).toContain("history.replaceState");
     expect(script).not.toContain("alert(");
+    expect(pageResponse.headers.get("content-security-policy")).toContain(
+      "frame-ancestors 'none'",
+    );
+    expect(pageResponse.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(pageResponse.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(pageResponse.headers.get("x-frame-options")).toBe("DENY");
+    expect(anonymousResponse.status).toBe(200);
+    expect(anonymousBody).not.toContain("public-history-test-token");
+    expect(anonymousBody).toContain("no active Agent Rewind session");
+    expect(invalidResponse.status).toBe(403);
   });
 
   it("bounds polled history and loads complete change-set details on demand", async () => {
