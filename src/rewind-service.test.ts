@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -241,6 +241,8 @@ describe("RewindService", () => {
     const restoredTarget = path.join(first.directory, "deleted-directory");
     await mkdir(path.join(restoredTarget, "nested"), { recursive: true });
     await mkdir(path.join(restoredTarget, "empty"));
+    await writeFile(path.join(restoredTarget, "Z.txt"), "uppercase sorts first\n");
+    await writeFile(path.join(restoredTarget, "a.txt"), "lowercase sorts second\n");
     await writeFile(path.join(restoredTarget, "root.txt"), "root content\n");
     await writeFile(path.join(restoredTarget, "nested", "child.txt"), "child content\n");
     const restoredBefore = await first.snapshots.capture(restoredTarget);
@@ -254,6 +256,9 @@ describe("RewindService", () => {
 
     await first.rewind.undo(restoredRecord.id);
     expect(await readFile(path.join(restoredTarget, "root.txt"), "utf8")).toBe("root content\n");
+    expect(await readFile(path.join(restoredTarget, "Z.txt"), "utf8")).toBe(
+      "uppercase sorts first\n",
+    );
     expect(await readFile(path.join(restoredTarget, "nested", "child.txt"), "utf8")).toBe(
       "child content\n",
     );
@@ -300,6 +305,32 @@ describe("RewindService", () => {
     expect(await readFile(path.join(source, "a.txt"), "utf8")).toBe("content");
   });
 
+  it("finishes a move undo after the rename completed before a crash", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const source = path.join(directory, "interrupted-source.txt");
+    const destination = path.join(directory, "interrupted-destination.txt");
+    await writeFile(source, "content\n");
+    const sourceBefore = await snapshots.capture(source);
+    const destinationBefore = await snapshots.capture(destination);
+    await rename(source, destination);
+    const record = change("move_file", [
+      { path: source, before: sourceBefore, after: await snapshots.capture(source) },
+      {
+        path: destination,
+        before: destinationBefore,
+        after: await snapshots.capture(destination),
+      },
+    ]);
+    ledger.add(record);
+
+    await snapshots.undoMove(record.paths[0], record.paths[1]);
+    expect(ledger.get(record.id)?.status).toBe("applied");
+
+    await expect(rewind.undo(record.id)).resolves.toMatchObject({ status: "undone" });
+    expect(await readFile(source, "utf8")).toBe("content\n");
+    await expect(lstat(destination)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("undoes multiple writes to the same path as one change set", async () => {
     const { directory, snapshots, ledger, rewind } = await fixture();
     const target = path.join(directory, "draft.txt");
@@ -319,6 +350,128 @@ describe("RewindService", () => {
     expect(result.actionCount).toBe(2);
     expect(await readFile(target, "utf8")).toBe("original\n");
     expect(ledger.validationReport().undo).toEqual({ attempted: 1, succeeded: 1, conflicts: 0 });
+  });
+
+  it("finishes a single undo after the filesystem was restored before a crash", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "interrupted-undo.txt");
+    await writeFile(target, "before\n");
+    const before = await snapshots.capture(target);
+    await writeFile(target, "after\n");
+    const after = await snapshots.capture(target);
+    const record = change("write_file", [{ path: target, before, after }]);
+    ledger.add(record);
+
+    await snapshots.restore(record.paths[0]);
+    expect(ledger.get(record.id)?.status).toBe("applied");
+
+    await expect(rewind.undo(record.id)).resolves.toMatchObject({ status: "undone" });
+    expect(await readFile(target, "utf8")).toBe("before\n");
+  });
+
+  it("resumes a change-set undo after its last action was restored before a crash", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "resumable-change-set.txt");
+    const changeSetId = randomUUID();
+    await writeFile(target, "original\n");
+    const original = await snapshots.capture(target);
+    await writeFile(target, "middle\n");
+    const middle = await snapshots.capture(target);
+    const first = change(
+      "write_file",
+      [{ path: target, before: original, after: middle }],
+      changeSetId,
+    );
+    ledger.add(first);
+    await writeFile(target, "final\n");
+    const final = await snapshots.capture(target);
+    const second = change(
+      "write_file",
+      [{ path: target, before: middle, after: final }],
+      changeSetId,
+    );
+    second.createdAt = first.createdAt;
+    ledger.add(second);
+
+    await snapshots.restore(second.paths[0]);
+    expect(ledger.get(second.id)?.status).toBe("applied");
+
+    const result = await rewind.undoChangeSet(changeSetId);
+    expect(result.status).toBe("undone");
+    expect(await readFile(target, "utf8")).toBe("original\n");
+  });
+
+  it("resumes a change-set undo with actions already marked undone", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const firstTarget = path.join(directory, "first-resumed.txt");
+    const secondTarget = path.join(directory, "second-resumed.txt");
+    const changeSetId = randomUUID();
+    await writeFile(firstTarget, "first before\n");
+    await writeFile(secondTarget, "second before\n");
+    const firstBefore = await snapshots.capture(firstTarget);
+    const secondBefore = await snapshots.capture(secondTarget);
+    await writeFile(firstTarget, "first after\n");
+    await writeFile(secondTarget, "second after\n");
+    const first = change(
+      "write_file",
+      [{ path: firstTarget, before: firstBefore, after: await snapshots.capture(firstTarget) }],
+      changeSetId,
+    );
+    const second = change(
+      "write_file",
+      [{ path: secondTarget, before: secondBefore, after: await snapshots.capture(secondTarget) }],
+      changeSetId,
+    );
+    ledger.add(first);
+    ledger.add(second);
+    await snapshots.restore(second.paths[0]);
+    second.status = "undone";
+    ledger.update(second);
+
+    const result = await rewind.undoChangeSet(changeSetId);
+    expect(result.status).toBe("undone");
+    expect(await readFile(firstTarget, "utf8")).toBe("first before\n");
+    expect(await readFile(secondTarget, "utf8")).toBe("second before\n");
+  });
+
+  it("does not overwrite a file with a corrupted snapshot blob", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "corrupt-file.txt");
+    await writeFile(target, "trusted before\n");
+    const before = await snapshots.capture(target);
+    await writeFile(target, "current after\n");
+    const after = await snapshots.capture(target);
+    const record = change("write_file", [{ path: target, before, after }]);
+    ledger.add(record);
+    if (before.kind !== "file") throw new Error("Expected file snapshot");
+    await writeFile(path.join(directory, "blobs", before.blob), "corrupt\n");
+
+    await expect(rewind.undo(record.id)).rejects.toThrow("failed verification");
+    expect(await readFile(target, "utf8")).toBe("current after\n");
+    expect(ledger.get(record.id)?.status).toBe("applied");
+  });
+
+  it("leaves no partial directory when a nested snapshot blob is corrupted", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "corrupt-directory");
+    await mkdir(path.join(target, "nested"), { recursive: true });
+    await writeFile(path.join(target, "root.txt"), "root\n");
+    await writeFile(path.join(target, "nested", "child.txt"), "child\n");
+    const before = await snapshots.capture(target);
+    await rm(target, { recursive: true });
+    const after = await snapshots.capture(target);
+    const record = change("rewind_delete_directory", [{ path: target, before, after }]);
+    ledger.add(record);
+    if (before.kind !== "directory") throw new Error("Expected directory snapshot");
+    const nested = before.children?.nested;
+    const child = nested?.kind === "directory" ? nested.children?.["child.txt"] : undefined;
+    if (child?.kind !== "file") throw new Error("Expected nested file snapshot");
+    await writeFile(path.join(directory, "blobs", child.blob), "corrupt\n");
+
+    await expect(rewind.undo(record.id)).rejects.toThrow("failed verification");
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(directory)).filter((name) => name.startsWith(".agent-rewind-restore-"))).toEqual([]);
+    expect(ledger.get(record.id)?.status).toBe("applied");
   });
 
   it("does not partially undo a change set when preflight finds a conflict", async () => {

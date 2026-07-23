@@ -133,30 +133,50 @@ export class RewindService {
     try {
       const records = this.ledger.listByChangeSet(id);
       if (records.length === 0) throw new Error(`Unknown change set: ${id}`);
-      if (records.some((record) => record.status !== "applied")) {
-        throw new Error("A change set can only be undone while all of its actions are applied");
+      if (records.some((record) => record.status === "conflict")) {
+        throw new Error("A conflicted change set cannot be resumed automatically");
       }
 
-      // Preflight only the final expected state for each path. Earlier actions on
-      // the same path become valid as later actions are reversed.
-      const finalByPath = new Map<string, PathChange>();
       const initialByPath = new Map<string, PathChange>();
       for (const record of records) {
         for (const change of record.paths) {
           if (!initialByPath.has(change.path)) initialByPath.set(change.path, change);
-          finalByPath.set(change.path, change);
         }
       }
+
+      // Simulate the whole reverse sequence before touching the filesystem. Each
+      // applied action may be fully or partly restored already if the previous
+      // process stopped between the filesystem change and the ledger update.
+      const virtualState = new Map<string, EntryState>();
       await Promise.all(
-        [...finalByPath.values()].map((change) => this.snapshots.assertCurrent(change)),
+        [...initialByPath.keys()].map(async (target) => {
+          virtualState.set(target, await this.snapshots.inspect(target));
+        }),
       );
+      for (const record of [...records].reverse()) {
+        if (record.status === "undone") continue;
+        for (const change of record.paths) {
+          const current = virtualState.get(change.path)!;
+          if (!statesMatch(current, change.after) && !statesMatch(current, change.before)) {
+            throw new RewindConflictError(change.path, change.after.hash, current.hash);
+          }
+          virtualState.set(change.path, change.before);
+        }
+      }
+      for (const change of initialByPath.values()) {
+        const final = virtualState.get(change.path)!;
+        if (!statesMatch(final, change.before)) {
+          throw new RewindConflictError(change.path, change.before.hash, final.hash);
+        }
+      }
 
       for (const record of [...records].reverse()) {
+        if (record.status === "undone") continue;
         await this.undoRecord(record);
       }
       for (const change of initialByPath.values()) {
-        const restored = await this.snapshots.capture(change.path);
-        if (restored.kind !== change.before.kind || restored.hash !== change.before.hash) {
+        const restored = await this.snapshots.inspect(change.path);
+        if (!statesMatch(restored, change.before)) {
           throw new Error(`Change-set undo verification failed for ${change.path}`);
         }
       }
@@ -202,8 +222,8 @@ export class RewindService {
         }
       }
       for (const change of record.paths) {
-        const restored = await this.snapshots.capture(change.path);
-        if (restored.kind !== change.before.kind || restored.hash !== change.before.hash) {
+        const restored = await this.snapshots.inspect(change.path);
+        if (!statesMatch(restored, change.before)) {
           throw new Error(`Undo verification failed for ${change.path}`);
         }
       }
@@ -274,6 +294,10 @@ const RECOVERY_DIFF_MAX_CHARACTERS = 40_000;
 
 function fileSize(state: EntryState): number {
   return state.kind === "file" ? state.size : 0;
+}
+
+function statesMatch(left: EntryState, right: EntryState): boolean {
+  return left.kind === right.kind && left.hash === right.hash;
 }
 
 function decodeText(content: Buffer): string | undefined {

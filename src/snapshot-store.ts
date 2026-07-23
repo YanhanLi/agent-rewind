@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { lstat, mkdir, open, readFile, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, open, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { EntryState, PathChange } from "./model.js";
 
@@ -44,7 +44,7 @@ export class SnapshotStore {
   async readFileState(state: EntryState): Promise<Buffer | undefined> {
     if (state.kind === "missing") return Buffer.alloc(0);
     if (state.kind === "directory") return undefined;
-    return readFile(path.join(this.blobDirectory, state.blob));
+    return this.readVerifiedBlob(state);
   }
 
   async capture(target: string): Promise<EntryState> {
@@ -100,30 +100,61 @@ export class SnapshotStore {
   }
 
   async restore(change: PathChange): Promise<void> {
-    await this.assertCurrent(change);
+    if (!(await this.restoreIsPending(change))) return;
 
     if (change.before.kind === "missing") {
+      if (!(await this.restoreIsPending(change))) return;
       await rm(change.path, { recursive: true, force: true });
       return;
     }
 
     if (change.before.kind === "file") {
-      await mkdir(path.dirname(change.path), { recursive: true });
-      await writeFile(change.path, await readFile(path.join(this.blobDirectory, change.before.blob)));
+      const content = await this.readVerifiedBlob(change.before);
+      const parent = path.dirname(change.path);
+      await mkdir(parent, { recursive: true });
+      const stagingDirectory = await mkdtemp(path.join(parent, ".agent-rewind-restore-"));
+      const stagedFile = path.join(stagingDirectory, "file");
+      try {
+        await writeFile(stagedFile, content, { flag: "wx" });
+        if (!(await this.restoreIsPending(change))) return;
+        if (change.after.kind === "missing") {
+          try {
+            await link(stagedFile, change.path);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            if (await this.restoreIsPending(change)) {
+              throw new Error(`Atomic restore could not create ${change.path}`);
+            }
+          }
+        } else {
+          await rename(stagedFile, change.path);
+        }
+      } finally {
+        await rm(stagingDirectory, { recursive: true, force: true });
+      }
       return;
     }
 
     if (change.after.kind === "missing") {
-      await this.validateDirectorySnapshot(change.before, change.path);
-      await mkdir(path.dirname(change.path), { recursive: true });
+      this.validateDirectorySnapshot(change.before, change.path);
+      const parent = path.dirname(change.path);
+      await mkdir(parent, { recursive: true });
+      const stagingDirectory = await mkdtemp(path.join(parent, ".agent-rewind-restore-"));
       try {
-        await mkdir(change.path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const current = await this.inspect(change.path);
-        throw new RewindConflictError(change.path, change.after.hash, current.hash);
+        await this.restoreDirectoryContents(stagingDirectory, change.before);
+        if (!(await this.restoreIsPending(change))) return;
+        try {
+          await rename(stagingDirectory, change.path);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+          if (await this.restoreIsPending(change)) {
+            throw new Error(`Atomic restore could not create ${change.path}`);
+          }
+        }
+      } finally {
+        await rm(stagingDirectory, { recursive: true, force: true });
       }
-      await this.restoreDirectoryContents(change.path, change.before);
     }
   }
 
@@ -134,14 +165,29 @@ export class SnapshotStore {
     }
   }
 
+  private async restoreIsPending(change: PathChange): Promise<boolean> {
+    const current = await this.inspect(change.path);
+    if (statesMatch(current, change.before)) return false;
+    if (!statesMatch(current, change.after)) {
+      throw new RewindConflictError(change.path, change.after.hash, current.hash);
+    }
+    return true;
+  }
+
   async undoMove(source: PathChange, destination: PathChange): Promise<void> {
     const [currentSource, currentDestination] = await Promise.all([
       this.inspect(source.path),
       this.inspect(destination.path),
     ]);
     if (
-      currentSource.hash !== source.after.hash ||
-      currentDestination.hash !== destination.after.hash
+      statesMatch(currentSource, source.before) &&
+      statesMatch(currentDestination, destination.before)
+    ) {
+      return;
+    }
+    if (
+      !statesMatch(currentSource, source.after) ||
+      !statesMatch(currentDestination, destination.after)
     ) {
       throw new RewindConflictError(
         destination.path,
@@ -153,20 +199,26 @@ export class SnapshotStore {
     await rename(destination.path, source.path);
   }
 
-  private async validateDirectorySnapshot(state: EntryState, target: string): Promise<void> {
+  private validateDirectorySnapshot(state: EntryState, target: string): void {
     if (state.kind !== "directory" || !state.children) {
       throw new Error(`Directory snapshot is not restorable: ${target}`);
     }
-    for (const [name, child] of Object.entries(state.children)) {
+    const entries: string[] = [];
+    const children = Object.entries(state.children).sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
+    for (const [name, child] of children) {
       validateChildName(name, target);
-      if (child.kind === "file") {
-        const blob = await lstat(path.join(this.blobDirectory, child.blob));
-        if (!blob.isFile()) throw new Error(`Snapshot blob is not a file: ${child.blob}`);
-      } else if (child.kind === "directory") {
-        await this.validateDirectorySnapshot(child, path.join(target, name));
-      } else {
+      entries.push(`${name}:${child.kind}:${child.hash}`);
+      if (child.kind === "directory") {
+        this.validateDirectorySnapshot(child, path.join(target, name));
+      } else if (child.kind === "missing") {
         throw new Error(`Directory snapshot contains a missing child: ${path.join(target, name)}`);
       }
+    }
+    const actualHash = createHash("sha256").update(entries.join("\n")).digest("hex");
+    if (actualHash !== state.hash) {
+      throw new SnapshotIntegrityError(`Directory snapshot hash mismatch: ${target}`);
     }
   }
 
@@ -177,11 +229,35 @@ export class SnapshotStore {
     for (const [name, child] of Object.entries(state.children)) {
       const childTarget = path.join(target, name);
       if (child.kind === "file") {
-        await writeFile(childTarget, await readFile(path.join(this.blobDirectory, child.blob)));
+        await writeFile(childTarget, await this.readVerifiedBlob(child), { flag: "wx" });
       } else if (child.kind === "directory") {
         await mkdir(childTarget);
         await this.restoreDirectoryContents(childTarget, child);
       }
+    }
+  }
+
+  private async readVerifiedBlob(state: Extract<EntryState, { kind: "file" }>): Promise<Buffer> {
+    if (state.blob !== state.hash || path.basename(state.blob) !== state.blob) {
+      throw new SnapshotIntegrityError(`Invalid content-addressed snapshot blob: ${state.blob}`);
+    }
+    const filename = path.join(this.blobDirectory, state.blob);
+    const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = await handle.stat();
+      if (!before.isFile()) {
+        throw new SnapshotIntegrityError(`Snapshot blob is not a file: ${state.blob}`);
+      }
+      const content = await handle.readFile();
+      const after = await handle.stat();
+      assertStableFile(before, after, filename);
+      const actualHash = createHash("sha256").update(content).digest("hex");
+      if (content.byteLength !== state.size || actualHash !== state.hash) {
+        throw new SnapshotIntegrityError(`Snapshot blob failed verification: ${state.blob}`);
+      }
+      return content;
+    } finally {
+      await handle.close();
     }
   }
 
@@ -294,6 +370,10 @@ function assertStableFile(
   }
 }
 
+function statesMatch(left: EntryState, right: EntryState): boolean {
+  return left.kind === right.kind && left.hash === right.hash;
+}
+
 function validateChildName(name: string, target: string): void {
   if (name.length === 0 || name === "." || name === ".." || path.basename(name) !== name) {
     throw new Error(`Invalid directory snapshot entry at ${target}`);
@@ -314,6 +394,13 @@ export class RewindConflictError extends Error {
   ) {
     super(`Refusing to overwrite a changed path: ${target}`);
     this.name = "RewindConflictError";
+  }
+}
+
+export class SnapshotIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SnapshotIntegrityError";
   }
 }
 

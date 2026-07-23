@@ -158,7 +158,7 @@ export class Ledger {
 
   list(limit = 50): ChangeRecord[] {
     const rows = this.database
-      .prepare("SELECT payload FROM changes ORDER BY created_at DESC LIMIT ?")
+      .prepare("SELECT payload FROM changes ORDER BY created_at DESC, rowid DESC LIMIT ?")
       .all(limit) as Array<{ payload: string }>;
     return rows.map((row) => parseRecord(row.payload));
   }
@@ -238,7 +238,7 @@ export class Ledger {
 
   private allRecords(): ChangeRecord[] {
     const rows = this.database
-      .prepare("SELECT payload FROM changes ORDER BY created_at ASC")
+      .prepare("SELECT payload FROM changes ORDER BY created_at ASC, rowid ASC")
       .all() as Array<{ payload: string }>;
     return rows.map((row) => parseRecord(row.payload));
   }
