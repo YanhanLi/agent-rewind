@@ -47,7 +47,7 @@ export class RewindService {
     for (const intent of this.ledger.listIntents()) {
       try {
         const after = await Promise.all(
-          intent.paths.map((change) => this.snapshots.capture(change.path)),
+          intent.paths.map((change) => this.snapshots.captureForRecord(change.path)),
         );
         const paths: PathChange[] = intent.paths.map((change, index) => ({
           ...change,

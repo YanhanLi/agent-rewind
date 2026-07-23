@@ -163,6 +163,7 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - MCP stdin 关闭或收到 SIGINT/SIGTERM 时，会先结束待审批请求并等待已获批 mutation 落账，再关闭上游子进程、本地 HTTP 服务和 SQLite。
 - 多个本地客户端共享 `~/.agent-rewind` 时，恢复、mutation 和撤销会跨进程串行；这保证账本一致性，但一个长时间未返回的上游操作也会让其他客户端等待。
 - 单文件快照默认上限为 16 MiB，总存储上限为 1 GiB，记录默认保留 7 天。
+- mutation 前的 `before` 内容必须能完整快照，否则操作不会开始；执行后的 `after` 内容若遇到配额或单文件上限，会退化为流式哈希和大小记录，仍可完成冲突检查、落账与撤销，但恢复预览可能只显示摘要。
 - 当前是单机、单用户工具，不应作为网络服务暴露。
 
 依赖审计的已知告警、实际可达性和复核命令见 [依赖安全说明](docs/DEPENDENCY_SECURITY.md)。项目不使用只在本仓库生效、却无法传递给 npm 使用者的 `overrides` 来制造本地零告警结果。

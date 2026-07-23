@@ -423,6 +423,43 @@ it("revalidates root containment after approval", async () => {
   }
 }, 20_000);
 
+it("settles and undoes a new file when no after-snapshot quota remains", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-quota-root-"));
+  const data = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-quota-data-"));
+  directories.push(root, data);
+  const target = path.join(root, "new.txt");
+  const port = 37_200 + Math.floor(Math.random() * 100);
+  const token = "quota-fallback-token";
+  const transport = proxyTransport(root, data, token, port, {
+    AGENT_REWIND_MAX_TOTAL_MB: "0.000001",
+  });
+  const client = new Client({ name: "quota-fallback", version: "1.0.0" });
+
+  try {
+    await client.connect(transport);
+    const call = client.callTool({
+      name: "write_file",
+      arguments: { path: target, content: "new content\n" },
+    });
+    const pending = await waitForPending(port, token);
+    await post(port, token, `/api/approvals/${pending.pending[0].id}/approve`);
+
+    const result = await call;
+    expect(result.isError).not.toBe(true);
+    expect(await readFile(target, "utf8")).toBe("new content\n");
+    const state = await stateFor(port, token);
+    expect(state.changes).toHaveLength(1);
+    const ledger = new Ledger(path.join(data, "ledger.sqlite"));
+    expect(ledger.listIntents()).toHaveLength(0);
+    ledger.close();
+
+    await post(port, token, `/api/changes/${state.changes[0].id}/undo`);
+    await expect(readFile(target, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await transport.close();
+  }
+}, 20_000);
+
 function proxyTransport(
   root: string,
   data: string,

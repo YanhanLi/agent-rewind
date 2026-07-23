@@ -428,6 +428,30 @@ describe("SnapshotStore limits", () => {
 
     expect(await snapshots.garbageCollect(new Set(), 5 * 60 * 1_000)).toBe(0);
   });
+
+  it("records a hash-only after state when snapshot storage is unavailable", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-after-state-"));
+    temporaryDirectories.push(directory);
+    const snapshots = new SnapshotStore(path.join(directory, "blobs"), {
+      maxFileBytes: 3,
+      maxTotalBytes: 1,
+    });
+    await snapshots.initialize();
+    const target = path.join(directory, "after.txt");
+    await writeFile(target, "larger than both limits\n");
+
+    await expect(snapshots.capture(target)).rejects.toThrow("per-file limit");
+    const state = await snapshots.captureForRecord(target);
+
+    expect(state).toMatchObject({ kind: "file", size: 24 });
+    if (state.kind !== "file") throw new Error("Expected file state");
+    await expect(readFile(path.join(directory, "blobs", state.blob))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      snapshots.assertCurrent({ path: target, before: { kind: "missing", hash: "unused" }, after: state }),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("Ledger compatibility", () => {

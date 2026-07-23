@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { EntryState, PathChange } from "./model.js";
 
@@ -47,6 +48,23 @@ export class SnapshotStore {
   }
 
   async capture(target: string): Promise<EntryState> {
+    return this.captureState(target, true);
+  }
+
+  async inspect(target: string): Promise<EntryState> {
+    return this.captureState(target, false);
+  }
+
+  async captureForRecord(target: string): Promise<EntryState> {
+    try {
+      return await this.captureState(target, true);
+    } catch (error) {
+      if (!(error instanceof SnapshotStorageError)) throw error;
+      return this.captureState(target, false);
+    }
+  }
+
+  private async captureState(target: string, persistFiles: boolean): Promise<EntryState> {
     let info;
     try {
       info = await lstat(target);
@@ -62,20 +80,7 @@ export class SnapshotStore {
     }
 
     if (info.isFile()) {
-      if (info.size > this.limits.maxFileBytes) {
-        throw new Error(
-          `Snapshot exceeds the per-file limit (${formatBytes(info.size)} > ${formatBytes(this.limits.maxFileBytes)}): ${target}`,
-        );
-      }
-      const content = await readFile(target);
-      if (content.byteLength > this.limits.maxFileBytes) {
-        throw new Error(
-          `Snapshot exceeds the per-file limit (${formatBytes(content.byteLength)} > ${formatBytes(this.limits.maxFileBytes)}): ${target}`,
-        );
-      }
-      const hash = createHash("sha256").update(content).digest("hex");
-      await this.ensureBlob(hash, content);
-      return { kind: "file", hash, blob: hash, size: content.byteLength };
+      return persistFiles ? this.captureFile(target) : inspectFile(target);
     }
 
     if (info.isDirectory()) {
@@ -83,7 +88,7 @@ export class SnapshotStore {
       const children: string[] = [];
       const manifest: Record<string, EntryState> = {};
       for (const name of names) {
-        const child = await this.capture(path.join(target, name));
+        const child = await this.captureState(path.join(target, name), persistFiles);
         children.push(`${name}:${child.kind}:${child.hash}`);
         manifest[name] = child;
       }
@@ -115,7 +120,7 @@ export class SnapshotStore {
         await mkdir(change.path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const current = await this.capture(change.path);
+        const current = await this.inspect(change.path);
         throw new RewindConflictError(change.path, change.after.hash, current.hash);
       }
       await this.restoreDirectoryContents(change.path, change.before);
@@ -123,7 +128,7 @@ export class SnapshotStore {
   }
 
   async assertCurrent(change: PathChange): Promise<void> {
-    const current = await this.capture(change.path);
+    const current = await this.inspect(change.path);
     if (current.hash !== change.after.hash || current.kind !== change.after.kind) {
       throw new RewindConflictError(change.path, change.after.hash, current.hash);
     }
@@ -131,8 +136,8 @@ export class SnapshotStore {
 
   async undoMove(source: PathChange, destination: PathChange): Promise<void> {
     const [currentSource, currentDestination] = await Promise.all([
-      this.capture(source.path),
-      this.capture(destination.path),
+      this.inspect(source.path),
+      this.inspect(destination.path),
     ]);
     if (
       currentSource.hash !== source.after.hash ||
@@ -194,7 +199,9 @@ export class SnapshotStore {
 
       await this.refreshTotalBlobBytes();
       if (this.totalBlobBytes + content.byteLength > this.limits.maxTotalBytes) {
-        throw new Error(`Snapshot storage quota exceeded (${formatBytes(this.limits.maxTotalBytes)}).`);
+        throw new SnapshotStorageError(
+          `Snapshot storage quota exceeded (${formatBytes(this.limits.maxTotalBytes)}).`,
+        );
       }
       try {
         await writeFile(blob, content, { flag: "wx" });
@@ -213,6 +220,32 @@ export class SnapshotStore {
     return result;
   }
 
+  private async captureFile(target: string): Promise<EntryState> {
+    const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = await handle.stat();
+      if (!before.isFile()) throw new Error(`Unsupported filesystem entry: ${target}`);
+      if (before.size > this.limits.maxFileBytes) {
+        throw new SnapshotStorageError(
+          `Snapshot exceeds the per-file limit (${formatBytes(before.size)} > ${formatBytes(this.limits.maxFileBytes)}): ${target}`,
+        );
+      }
+      const content = await handle.readFile();
+      const after = await handle.stat();
+      assertStableFile(before, after, target);
+      if (content.byteLength > this.limits.maxFileBytes) {
+        throw new SnapshotStorageError(
+          `Snapshot exceeds the per-file limit (${formatBytes(content.byteLength)} > ${formatBytes(this.limits.maxFileBytes)}): ${target}`,
+        );
+      }
+      const hash = createHash("sha256").update(content).digest("hex");
+      await this.ensureBlob(hash, content);
+      return { kind: "file", hash, blob: hash, size: content.byteLength };
+    } finally {
+      await handle.close();
+    }
+  }
+
   private async refreshTotalBlobBytes(): Promise<void> {
     const sizes = await Promise.all(
       (await readdir(this.blobDirectory)).map(async (name) => {
@@ -221,6 +254,43 @@ export class SnapshotStore {
       }),
     );
     this.totalBlobBytes = sizes.reduce((total, size) => total + size, 0);
+  }
+}
+
+async function inspectFile(target: string): Promise<EntryState> {
+  const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await handle.stat();
+    if (!before.isFile()) throw new Error(`Unsupported filesystem entry: ${target}`);
+    const hash = createHash("sha256");
+    let size = 0;
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      const content = chunk as Buffer;
+      hash.update(content);
+      size += content.byteLength;
+    }
+    const after = await handle.stat();
+    assertStableFile(before, after, target);
+    const digest = hash.digest("hex");
+    return { kind: "file", hash: digest, blob: digest, size };
+  } finally {
+    await handle.close();
+  }
+}
+
+function assertStableFile(
+  before: Stats,
+  after: Stats,
+  target: string,
+): void {
+  if (
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeMs !== after.mtimeMs ||
+    before.ctimeMs !== after.ctimeMs
+  ) {
+    throw new Error(`File changed while it was being snapshotted: ${target}`);
   }
 }
 
@@ -244,5 +314,12 @@ export class RewindConflictError extends Error {
   ) {
     super(`Refusing to overwrite a changed path: ${target}`);
     this.name = "RewindConflictError";
+  }
+}
+
+class SnapshotStorageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SnapshotStorageError";
   }
 }
