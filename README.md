@@ -1,5 +1,17 @@
 # Agent Rewind
 
+[![CI](https://github.com/YanhanLi/agent-rewind/actions/workflows/ci.yml/badge.svg)](https://github.com/YanhanLi/agent-rewind/actions/workflows/ci.yml)
+
+See what coding agents will change, approve it locally, and rewind mistakes without overwriting newer work.
+
+在 Agent 改文件前看清影响，本地批准；出错后整组撤销，同时保护之后的人工修改。
+
+![Agent Rewind intercepts a filesystem change, verifies undo readiness, and restores the task](https://github.com/YanhanLi/agent-rewind/raw/main/.github/assets/agent-rewind-demo.gif)
+
+The recording uses the real MCP proxy, temporary files, SQLite ledger, snapshot verification, and change-set undo. No UI mock is involved.
+
+上图由真实 MCP 代理、临时文件、SQLite 账本、快照校验和整组撤销流程自动生成，不是静态 UI mock。
+
 [中文](#中文说明) | [English](#english)
 
 ## 中文说明
@@ -39,6 +51,8 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind demo
 ```bash
 npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind demo --auto
 ```
+
+仓库中的演示动图可通过 `npm run capture:demo` 重新生成，需要本机安装 Chrome 和 ffmpeg；可用 `CHROME_PATH` 指定 Chrome 可执行文件。
 
 ### 快速开始
 
@@ -198,6 +212,8 @@ node dist/cli.js /绝对路径/允许访问的目录
 ## English
 
 Agent Rewind is a local MCP filesystem wrapper that previews mutations, requires explicit approval, and records verifiable undo information. It supports Claude Desktop, OpenCode, and Codex on macOS and wraps the official Filesystem MCP Server.
+
+Run the same isolated scenario shown at the top of this README with `agent-rewind demo`. Repository maintainers can regenerate the recording with `npm run capture:demo`; Chrome and ffmpeg are required, and `CHROME_PATH` can override the browser executable.
 
 Key properties:
 

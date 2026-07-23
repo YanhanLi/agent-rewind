@@ -1,6 +1,6 @@
 {
   "name": "agent-rewind",
-  "version": "0.29.0",
+  "version": "0.30.0",
   "description": "Preview and safely undo filesystem actions made through MCP.",
   "type": "module",
   "bin": {
@@ -15,6 +15,7 @@
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
     "dev": "tsx src/cli.ts",
+    "capture:demo": "npm run build && node scripts/capture-demo.mjs",
     "test": "npm run build && vitest run",
     "check": "npm run build && vitest run",
     "audit:high": "npm audit --registry=https://registry.npmjs.org --omit=dev --audit-level=high"
