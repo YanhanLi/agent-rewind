@@ -474,6 +474,48 @@ describe("RewindService", () => {
     expect(ledger.get(record.id)?.status).toBe("applied");
   });
 
+  it("preflights every snapshot before changing any path in a change set", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const firstTarget = path.join(directory, "first-integrity.txt");
+    const secondTarget = path.join(directory, "second-integrity.txt");
+    const changeSetId = randomUUID();
+    await writeFile(firstTarget, "first before\n");
+    await writeFile(secondTarget, "second before\n");
+    const firstBefore = await snapshots.capture(firstTarget);
+    const secondBefore = await snapshots.capture(secondTarget);
+    await writeFile(firstTarget, "first after\n");
+    await writeFile(secondTarget, "second after\n");
+    ledger.add(
+      change(
+        "write_file",
+        [{ path: firstTarget, before: firstBefore, after: await snapshots.capture(firstTarget) }],
+        changeSetId,
+      ),
+    );
+    ledger.add(
+      change(
+        "write_file",
+        [
+          {
+            path: secondTarget,
+            before: secondBefore,
+            after: await snapshots.capture(secondTarget),
+          },
+        ],
+        changeSetId,
+      ),
+    );
+    if (firstBefore.kind !== "file") throw new Error("Expected file snapshot");
+    await writeFile(path.join(directory, "blobs", firstBefore.blob), "corrupt\n");
+
+    await expect(rewind.undoChangeSet(changeSetId)).rejects.toThrow("failed verification");
+    expect(await readFile(firstTarget, "utf8")).toBe("first after\n");
+    expect(await readFile(secondTarget, "utf8")).toBe("second after\n");
+    expect(ledger.listByChangeSet(changeSetId).every((record) => record.status === "applied")).toBe(
+      true,
+    );
+  });
+
   it("does not partially undo a change set when preflight finds a conflict", async () => {
     const { directory, snapshots, ledger, rewind } = await fixture();
     const first = path.join(directory, "first.txt");

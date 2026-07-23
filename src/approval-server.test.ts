@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalServer } from "./approval-server.js";
 import type { ChangeRecord } from "./model.js";
 import type { RewindService } from "./rewind-service.js";
+import { RewindConflictError, SnapshotIntegrityError } from "./snapshot-store.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -238,9 +239,53 @@ describe("ApprovalServer", () => {
     const pageResponse = await fetch(
       `http://127.0.0.1:${approval.port}/?token=public-history-test-token`,
     );
-    const script = (await pageResponse.text()).match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const pageBody = await pageResponse.text();
+    const script = pageBody.match(/<script>([\s\S]*)<\/script>/)?.[1];
     expect(script).toBeDefined();
     expect(() => new Script(script!)).not.toThrow();
+    expect(pageBody).toContain('id="feedback"');
+    expect(script).toContain("button.disabled=true");
+    expect(script).not.toContain("alert(");
+  });
+
+  it("returns stable, actionable undo failure responses", async () => {
+    const previousToken = process.env.AGENT_REWIND_TOKEN;
+    process.env.AGENT_REWIND_TOKEN = "undo-error-test-token";
+    const rewind = {
+      undoChangeSet: async (id: string) => {
+        if (id === "conflict") {
+          throw new RewindConflictError("/tmp/newer.txt", "expected-secret", "actual-secret");
+        }
+        throw new SnapshotIntegrityError("internal blob hash details");
+      },
+    } as unknown as RewindService;
+    const approval = new ApprovalServer(rewind, 32_250, 120_000, () => undefined, "linux");
+    await approval.start();
+    cleanup.push(async () => {
+      await approval.stop();
+      if (previousToken === undefined) delete process.env.AGENT_REWIND_TOKEN;
+      else process.env.AGENT_REWIND_TOKEN = previousToken;
+    });
+
+    const conflictResponse = await fetch(
+      `http://127.0.0.1:${approval.port}/api/change-sets/conflict/undo`,
+      { method: "POST", headers: { "X-Agent-Rewind-Token": "undo-error-test-token" } },
+    );
+    const conflict = (await conflictResponse.json()) as Record<string, string>;
+    expect(conflictResponse.status).toBe(409);
+    expect(conflict).toMatchObject({ code: "undo_conflict", target: "/tmp/newer.txt" });
+    expect(conflict.error).toContain("newer content was not overwritten");
+    expect(JSON.stringify(conflict)).not.toContain("expected-secret");
+
+    const integrityResponse = await fetch(
+      `http://127.0.0.1:${approval.port}/api/change-sets/integrity/undo`,
+      { method: "POST", headers: { "X-Agent-Rewind-Token": "undo-error-test-token" } },
+    );
+    const integrity = (await integrityResponse.json()) as Record<string, string>;
+    expect(integrityResponse.status).toBe(422);
+    expect(integrity.code).toBe("snapshot_integrity");
+    expect(integrity.error).toContain("Unverified content was not written");
+    expect(JSON.stringify(integrity)).not.toContain("internal blob hash details");
   });
 });
 

@@ -64,6 +64,16 @@ export class SnapshotStore {
     }
   }
 
+  async verifySnapshot(state: EntryState, target: string): Promise<void> {
+    if (state.kind === "missing") return;
+    if (state.kind === "file") {
+      await this.readVerifiedBlob(state);
+      return;
+    }
+    this.validateDirectorySnapshot(state, target);
+    await this.verifyDirectoryBlobs(state, target);
+  }
+
   private async captureState(target: string, persistFiles: boolean): Promise<EntryState> {
     let info;
     try {
@@ -237,13 +247,27 @@ export class SnapshotStore {
     }
   }
 
+  private async verifyDirectoryBlobs(state: EntryState, target: string): Promise<void> {
+    if (state.kind !== "directory" || !state.children) {
+      throw new Error(`Directory snapshot is not restorable: ${target}`);
+    }
+    for (const [name, child] of Object.entries(state.children)) {
+      if (child.kind === "file") {
+        await this.readVerifiedBlob(child);
+      } else if (child.kind === "directory") {
+        await this.verifyDirectoryBlobs(child, path.join(target, name));
+      }
+    }
+  }
+
   private async readVerifiedBlob(state: Extract<EntryState, { kind: "file" }>): Promise<Buffer> {
     if (state.blob !== state.hash || path.basename(state.blob) !== state.blob) {
       throw new SnapshotIntegrityError(`Invalid content-addressed snapshot blob: ${state.blob}`);
     }
     const filename = path.join(this.blobDirectory, state.blob);
-    const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
+      handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
       const before = await handle.stat();
       if (!before.isFile()) {
         throw new SnapshotIntegrityError(`Snapshot blob is not a file: ${state.blob}`);
@@ -256,8 +280,14 @@ export class SnapshotStore {
         throw new SnapshotIntegrityError(`Snapshot blob failed verification: ${state.blob}`);
       }
       return content;
+    } catch (error) {
+      if (error instanceof SnapshotIntegrityError) throw error;
+      throw new SnapshotIntegrityError(
+        `Snapshot blob could not be read safely: ${state.blob}`,
+        error,
+      );
     } finally {
-      await handle.close();
+      await handle?.close();
     }
   }
 
@@ -398,8 +428,8 @@ export class RewindConflictError extends Error {
 }
 
 export class SnapshotIntegrityError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
     this.name = "SnapshotIntegrityError";
   }
 }

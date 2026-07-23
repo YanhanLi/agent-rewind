@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import path from "node:path";
 import type { ChangeRecord, ChangeSetView, PendingApproval } from "./model.js";
 import type { RewindService } from "./rewind-service.js";
+import { RewindConflictError, SnapshotIntegrityError } from "./snapshot-store.js";
 
 interface Waiter {
   request: PendingApproval;
@@ -205,8 +206,15 @@ export class ApprovalServer {
       response.statusCode = 404;
       response.end(JSON.stringify({ error: "Not found" }));
     } catch (error) {
-      response.statusCode = 409;
-      response.end(JSON.stringify({ error: (error as Error).message }));
+      const failure = publicApiError(error);
+      response.statusCode = failure.status;
+      response.end(
+        JSON.stringify({
+          error: failure.message,
+          code: failure.code,
+          ...(failure.target ? { target: failure.target } : {}),
+        }),
+      );
     }
   }
 
@@ -275,22 +283,52 @@ function matchesChangeSetRule(
   });
 }
 
+function publicApiError(error: unknown): {
+  status: number;
+  code: string;
+  message: string;
+  target?: string;
+} {
+  if (error instanceof RewindConflictError) {
+    return {
+      status: 409,
+      code: "undo_conflict",
+      message: `Undo stopped because this path changed after the Agent action: ${error.target}. Your newer content was not overwritten.`,
+      target: error.target,
+    };
+  }
+  if (error instanceof SnapshotIntegrityError) {
+    return {
+      status: 422,
+      code: "snapshot_integrity",
+      message:
+        "Undo stopped because a recovery snapshot could not be verified. Unverified content was not written; check the terminal for details.",
+    };
+  }
+  return {
+    status: 409,
+    code: "request_failed",
+    message: error instanceof Error ? error.message : "The request could not be completed.",
+  };
+}
+
 function page(token: string): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agent Rewind</title><style>
-:root{font-family:ui-sans-serif,system-ui;color:#171717;background:#f5f5f4}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}header{background:#171717;color:white;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}h1{font-size:18px;margin:0;letter-spacing:0;white-space:nowrap}main{width:100%;max-width:920px;margin:28px auto;padding:0 18px}h2{font-size:14px;text-transform:uppercase;color:#666;margin:26px 0 10px}.item{width:100%;background:white;border:1px solid #ddd;border-radius:6px;padding:16px;margin:10px 0;min-width:0}.recovered{border-color:#d97706}.notice{margin:12px 0;color:#7c2d12;background:#fffbeb;border-left:3px solid #d97706;padding:10px 12px;font-size:13px;line-height:1.45}.preview{margin-top:12px}.preview pre{margin:6px 0 0;background:#fafafa;white-space:pre;overflow-wrap:normal}.row{display:flex;gap:10px;align-items:center;justify-content:space-between;min-width:0}.row>div{min-width:0}.row>div:last-child{display:flex;gap:5px;flex:none}.summary{max-width:100%;font-weight:650;overflow-wrap:anywhere}.meta{max-width:100%;font:12px ui-monospace,monospace;color:#777;margin-top:5px;overflow-wrap:anywhere}.actions{margin-top:12px;border-top:1px solid #e7e5e4}.action{padding:9px 0;border-bottom:1px solid #eee;font-size:13px;overflow-wrap:anywhere}.action:last-child{border-bottom:0}.paths{margin-top:8px;color:#555;font-size:12px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f4;border:1px solid #e7e5e4;padding:12px;font-size:12px;max-height:300px;max-width:100%;overflow:auto}button{border:0;border-radius:5px;padding:8px 13px;min-height:32px;font-weight:650;cursor:pointer;white-space:nowrap}.approve,.keep{background:#15803d;color:white}.reject{background:#dc2626;color:white}.undo{background:#171717;color:white}.empty{color:#777;padding:22px 0}.status{font-size:12px;padding:3px 7px;background:#eee;border-radius:4px}.recovery-status{background:#fef3c7;color:#92400e}@media(max-width:600px){header{padding:16px 18px}header span{display:none}main{margin:18px 0;padding:0 12px;max-width:100vw}.item{padding:16px;max-width:calc(100vw - 24px);overflow:hidden}.row{width:100%;max-width:100%;align-items:stretch;flex-direction:column;overflow:hidden}.row>div:first-child{width:100%;max-width:100%}.summary{word-break:break-all}.row>div:last-child{width:100%;max-width:100%;display:grid;grid-template-columns:minmax(0,1fr);margin-top:4px}.row button{padding:8px 6px;font-size:12px;width:100%;white-space:normal;overflow-wrap:anywhere}}
-</style></head><body><header><h1>Agent Rewind</h1><span>Local approval and recovery</span></header><main><h2>Waiting for approval</h2><div id="pending"></div><h2>Recovered changes</h2><div id="recovered"></div><h2>Change history</h2><div id="history"></div></main><script>
+:root{font-family:ui-sans-serif,system-ui;color:#171717;background:#f5f5f4}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}header{background:#171717;color:white;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}h1{font-size:18px;margin:0;letter-spacing:0;white-space:nowrap}main{width:100%;max-width:920px;margin:28px auto;padding:0 18px}h2{font-size:14px;text-transform:uppercase;color:#666;margin:26px 0 10px}.feedback{display:none;margin:0 0 18px;color:#991b1b;background:#fef2f2;border-left:3px solid #dc2626;padding:11px 12px;font-size:13px;line-height:1.45;overflow-wrap:anywhere}.feedback.visible{display:block}.item{width:100%;background:white;border:1px solid #ddd;border-radius:6px;padding:16px;margin:10px 0;min-width:0}.recovered{border-color:#d97706}.notice{margin:12px 0;color:#7c2d12;background:#fffbeb;border-left:3px solid #d97706;padding:10px 12px;font-size:13px;line-height:1.45}.preview{margin-top:12px}.preview pre{margin:6px 0 0;background:#fafafa;white-space:pre;overflow-wrap:normal}.row{display:flex;gap:10px;align-items:center;justify-content:space-between;min-width:0}.row>div{min-width:0}.row>div:last-child{display:flex;gap:5px;flex:none}.summary{max-width:100%;font-weight:650;overflow-wrap:anywhere}.meta{max-width:100%;font:12px ui-monospace,monospace;color:#777;margin-top:5px;overflow-wrap:anywhere}.actions{margin-top:12px;border-top:1px solid #e7e5e4}.action{padding:9px 0;border-bottom:1px solid #eee;font-size:13px;overflow-wrap:anywhere}.action:last-child{border-bottom:0}.paths{margin-top:8px;color:#555;font-size:12px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f4;border:1px solid #e7e5e4;padding:12px;font-size:12px;max-height:300px;max-width:100%;overflow:auto}button{border:0;border-radius:5px;padding:8px 13px;min-height:32px;font-weight:650;cursor:pointer;white-space:nowrap}button:disabled{cursor:wait;opacity:.55}.approve,.keep{background:#15803d;color:white}.reject{background:#dc2626;color:white}.undo{background:#171717;color:white}.empty{color:#777;padding:22px 0}.status{font-size:12px;padding:3px 7px;background:#eee;border-radius:4px}.recovery-status{background:#fef3c7;color:#92400e}@media(max-width:600px){header{padding:16px 18px}header span{display:none}main{margin:18px 0;padding:0 12px;max-width:100vw}.item{padding:16px;max-width:calc(100vw - 24px);overflow:hidden}.row{width:100%;max-width:100%;align-items:stretch;flex-direction:column;overflow:hidden}.row>div:first-child{width:100%;max-width:100%}.summary{word-break:break-all}.row>div:last-child{width:100%;max-width:100%;display:grid;grid-template-columns:minmax(0,1fr);margin-top:4px}.row button{padding:8px 6px;font-size:12px;width:100%;white-space:normal;overflow-wrap:anywhere}}
+</style></head><body><header><h1>Agent Rewind</h1><span>Local approval and recovery</span></header><main><div id="feedback" class="feedback" role="status" aria-live="polite"></div><h2>Waiting for approval</h2><div id="pending"></div><h2>Recovered changes</h2><div id="recovered"></div><h2>Change history</h2><div id="history"></div></main><script>
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const token=${JSON.stringify(token)};const headers={'X-Agent-Rewind-Token':token};
 const previewCache=new Map();
 const countSummary=x=>x.actionCount+' action'+(x.actionCount===1?'':'s')+' across '+x.affectedPaths.length+' path'+(x.affectedPaths.length===1?'':'s');
 const setTitle=x=>x.label?esc(x.label):countSummary(x);const setMeta=x=>(x.label?countSummary(x)+' · ':'')+new Date(x.createdAt).toLocaleString()+' · change set '+esc(x.id.slice(0,8));
-async function post(url){const r=await fetch(url,{method:'POST',headers});const body=await r.json();if(!r.ok)alert(body.error);await refresh()}
+const feedback=document.querySelector('#feedback');const showError=message=>{feedback.textContent=message;feedback.classList.add('visible')};const clearError=()=>{feedback.textContent='';feedback.classList.remove('visible')};
+async function post(url,button){clearError();if(button)button.disabled=true;try{const r=await fetch(url,{method:'POST',headers});const body=await r.json();if(!r.ok){showError(body.error||'The action could not be completed.');return}await refresh()}catch{showError('Agent Rewind could not reach its local service.')}finally{if(button?.isConnected)button.disabled=false}}
 const actions=x=>\`<div class="paths">\${x.affectedPaths.map(esc).join('<br>')}</div><div class="actions">\${x.changes.map(c=>\`<div class="action">\${esc(c.summary)}</div>\`).join('')}</div>\`;
-const historyCard=x=>\`<div class="item"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status">\${esc(x.status)}</span> \${x.status==='applied'?\`<button class="undo" onclick="post('/api/change-sets/\${x.id}/undo')">Undo set</button>\`:''}</div></div>\${actions(x)}</div>\`;
-const recoveredCard=x=>{const previews=previewCache.get(x.id);return \`<div class="item recovered"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status recovery-status">needs review</span><button class="undo" onclick="post('/api/change-sets/\${x.id}/undo')">Undo set</button><button class="keep" onclick="post('/api/change-sets/\${x.id}/review')">Keep changes</button></div></div><div class="notice">Agent Rewind found this change after an interrupted operation. Review the snapshot-backed evidence before keeping or undoing it.</div>\${previews?previews.map(p=>\`<div class="preview"><div class="meta">\${esc(p.path)} · \${esc(p.kind)}</div><pre>\${esc(p.detail)}</pre></div>\`).join(''):'<div class="meta">Loading snapshot evidence...</div>'}\${actions(x)}</div>\`};
+const historyCard=x=>\`<div class="item"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status">\${esc(x.status)}</span> \${x.status==='applied'?\`<button class="undo" onclick="post('/api/change-sets/\${x.id}/undo',this)">Undo set</button>\`:''}</div></div>\${actions(x)}</div>\`;
+const recoveredCard=x=>{const previews=previewCache.get(x.id);return \`<div class="item recovered"><div class="row"><div><div class="summary">\${setTitle(x)}</div><div class="meta">\${setMeta(x)}</div></div><div><span class="status recovery-status">needs review</span><button class="undo" onclick="post('/api/change-sets/\${x.id}/undo',this)">Undo set</button><button class="keep" onclick="post('/api/change-sets/\${x.id}/review',this)">Keep changes</button></div></div><div class="notice">Agent Rewind found this change after an interrupted operation. Review the snapshot-backed evidence before keeping or undoing it.</div>\${previews?previews.map(p=>\`<div class="preview"><div class="meta">\${esc(p.path)} · \${esc(p.kind)}</div><pre>\${esc(p.detail)}</pre></div>\`).join(''):'<div class="meta">Loading snapshot evidence...</div>'}\${actions(x)}</div>\`};
 async function renderRecovered(items){document.querySelector('#recovered').innerHTML=items.length?items.map(recoveredCard).join(''):'<div class="empty">No interrupted changes need review.</div>';await Promise.all(items.filter(x=>!previewCache.has(x.id)).map(async x=>{const r=await fetch('/api/change-sets/'+x.id+'/recovery-preview',{headers});if(r.ok)previewCache.set(x.id,(await r.json()).previews)}));document.querySelector('#recovered').innerHTML=items.length?items.map(recoveredCard).join(''):'<div class="empty">No interrupted changes need review.</div>'}
-async function refresh(){const r=await fetch('/api/state',{headers});if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}\${x.changeSetLabel?' · '+esc(x.changeSetLabel):''}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject')">Reject</button> \${x.changeSetId?\`<button onclick="post('/api/approvals/\${x.id}/approve-set')">Allow set</button>\`:''} <button onclick="post('/api/approvals/\${x.id}/approve-session')">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve')">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';await renderRecovered(s.recovered);const history=s.changeSets.filter(x=>x.recoveryStatus!=='pending');document.querySelector('#history').innerHTML=history.length?history.map(historyCard).join(''):'<div class="empty">No recorded changes yet.</div>'}refresh();setInterval(refresh,1000);
+async function refresh(){const r=await fetch('/api/state',{headers});if(!r.ok)return;const s=await r.json();document.querySelector('#pending').innerHTML=s.pending.length?s.pending.map(x=>\`<div class="item"><div class="row"><div><div class="summary">\${esc(x.summary)}</div><div class="meta">\${esc(x.tool)} · expires \${new Date(x.expiresAt).toLocaleTimeString()}\${x.changeSetLabel?' · '+esc(x.changeSetLabel):''}</div></div><div><button class="reject" onclick="post('/api/approvals/\${x.id}/reject',this)">Reject</button> \${x.changeSetId?\`<button onclick="post('/api/approvals/\${x.id}/approve-set',this)">Allow set</button>\`:''} <button onclick="post('/api/approvals/\${x.id}/approve-session',this)">Allow in folder</button> <button class="approve" onclick="post('/api/approvals/\${x.id}/approve',this)">Approve</button></div></div><div class="meta">Scope: \${esc(x.scope)}</div><pre>\${esc(x.detail)}</pre></div>\`).join(''):'<div class="empty">No actions are waiting.</div>';await renderRecovered(s.recovered);const history=s.changeSets.filter(x=>x.recoveryStatus!=='pending');document.querySelector('#history').innerHTML=history.length?history.map(historyCard).join(''):'<div class="empty">No recorded changes yet.</div>'}refresh();setInterval(refresh,1000);
 </script></body></html>`;
 }

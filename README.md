@@ -163,6 +163,7 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - 进程意外退出后会在下次启动对账未完成的 intent；如果目标暂时无法读取，intent 会保留到后续启动，不会自动丢弃原始快照。
 - 撤销会在写回前重新校验内容寻址 blob 的大小和 SHA-256；文件和被删目录先在目标同级构建暂存内容，再原子提交，校验或写入失败不会留下半恢复目录。
 - 单次撤销和 change set 撤销都可识别“文件已恢复、账本仍显示 applied”的中间态并继续完成；已落账的 change-set action 不会被重复执行。
+- change set 会在修改任何路径前顺序校验全部待用快照；冲突与快照完整性失败使用不同的 API 错误码，并在审批页显示不会被定时刷新清掉的操作提示。
 - MCP stdin 关闭或收到 SIGINT/SIGTERM 时，会先结束待审批请求并等待已获批 mutation 落账，再关闭上游子进程、本地 HTTP 服务和 SQLite。
 - 多个本地客户端共享 `~/.agent-rewind` 时，恢复、mutation 和撤销会跨进程串行；这保证账本一致性，但一个长时间未返回的上游操作也会让其他客户端等待。
 - 单文件快照默认上限为 16 MiB，总存储上限为 1 GiB，记录默认保留 7 天。
@@ -201,6 +202,7 @@ Key properties:
 - recursive directory deletion with restorable file and empty-directory manifests;
 - local SQLite ledger and content-addressed snapshots;
 - SHA-256 verification of snapshot blobs and staged atomic file/directory restoration;
+- bounded change-set snapshot preflight and actionable conflict/integrity feedback in the approval UI;
 - crash recovery through persistent pre-mutation intents and startup reconciliation;
 - a dedicated recovery-review queue with explicit keep or undo decisions;
 - bounded snapshot-backed diffs with binary, directory, and large-file summaries;

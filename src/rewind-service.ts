@@ -169,10 +169,14 @@ export class RewindService {
           throw new RewindConflictError(change.path, change.before.hash, final.hash);
         }
       }
+      for (const record of records) {
+        if (record.status !== "applied" || record.tool === "move_file") continue;
+        await this.verifyRecordSnapshots(record);
+      }
 
       for (const record of [...records].reverse()) {
         if (record.status === "undone") continue;
-        await this.undoRecord(record);
+        await this.undoRecord(record, true);
       }
       for (const change of initialByPath.values()) {
         const restored = await this.snapshots.inspect(change.path);
@@ -212,11 +216,15 @@ export class RewindService {
     }
   }
 
-  private async undoRecord(record: ChangeRecord): Promise<ChangeRecord> {
+  private async undoRecord(
+    record: ChangeRecord,
+    snapshotsVerified = false,
+  ): Promise<ChangeRecord> {
     try {
       if (record.tool === "move_file") {
         await this.snapshots.undoMove(record.paths[0], record.paths[1]);
       } else {
+        if (!snapshotsVerified) await this.verifyRecordSnapshots(record);
         for (const change of [...record.paths].reverse()) {
           await this.snapshots.restore(change);
         }
@@ -238,6 +246,12 @@ export class RewindService {
 
     this.ledger.update(record);
     return record;
+  }
+
+  private async verifyRecordSnapshots(record: ChangeRecord): Promise<void> {
+    for (const change of record.paths) {
+      await this.snapshots.verifySnapshot(change.before, change.path);
+    }
   }
 
   private async previewRecoveryPath(change: PathChange): Promise<RecoveryPreview> {
