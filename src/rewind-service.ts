@@ -33,6 +33,10 @@ export class RewindService {
     return this.ledger.listChangeSets();
   }
 
+  getChangeSet(id: string): ChangeSetView | undefined {
+    return this.ledger.getChangeSet(id);
+  }
+
   recordEvent(event: LocalEvent): void {
     this.ledger.recordEvent(event);
   }

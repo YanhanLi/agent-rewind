@@ -235,6 +235,7 @@ describe("ApprovalServer", () => {
     expect(body).toContain("/tmp/archive");
     expect(body).not.toContain("private.txt");
     expect(body).not.toContain("secret-hash");
+    expect(response.headers.get("cache-control")).toBe("no-store");
 
     const pageResponse = await fetch(
       `http://127.0.0.1:${approval.port}/?token=public-history-test-token`,
@@ -246,6 +247,90 @@ describe("ApprovalServer", () => {
     expect(pageBody).toContain('id="feedback"');
     expect(script).toContain("button.disabled=true");
     expect(script).not.toContain("alert(");
+  });
+
+  it("bounds polled history and loads complete change-set details on demand", async () => {
+    const previousToken = process.env.AGENT_REWIND_TOKEN;
+    process.env.AGENT_REWIND_TOKEN = "bounded-history-test-token";
+    const createdAt = new Date().toISOString();
+    const records: ChangeRecord[] = Array.from({ length: 25 }, (_, index) => ({
+      id: `change-${index}`,
+      changeSetId: "large-set",
+      tool: "write_file",
+      summary: `Write file ${index}`,
+      createdAt,
+      status: "applied",
+      paths: [
+        {
+          path: `/tmp/file-${index}.txt`,
+          before: { kind: "missing", hash: `missing-${index}` },
+          after: { kind: "file", hash: `file-${index}`, blob: `blob-${index}`, size: 1 },
+        },
+      ],
+    }));
+    const changeSet = {
+      id: "large-set",
+      createdAt,
+      updatedAt: createdAt,
+      status: "applied" as const,
+      actionCount: records.length,
+      affectedPaths: records.map((record) => record.paths[0].path),
+      changes: records,
+    };
+    const rewind = {
+      list: () => records,
+      listChangeSets: () => [changeSet],
+      getChangeSet: (id: string) => (id === changeSet.id ? changeSet : undefined),
+      recordEvent: () => undefined,
+    } as unknown as RewindService;
+    const approval = new ApprovalServer(rewind, 32_245, 120_000, () => undefined, "linux");
+    await approval.start();
+    cleanup.push(async () => {
+      await approval.stop();
+      if (previousToken === undefined) delete process.env.AGENT_REWIND_TOKEN;
+      else process.env.AGENT_REWIND_TOKEN = previousToken;
+    });
+
+    const stateResponse = await fetch(`http://127.0.0.1:${approval.port}/api/state`, {
+      headers: { "X-Agent-Rewind-Token": "bounded-history-test-token" },
+    });
+    const state = (await stateResponse.json()) as {
+      changeSets: Array<{
+        actionCount: number;
+        affectedPathCount: number;
+        affectedPaths: string[];
+        changes: unknown[];
+        detailsTruncated: boolean;
+      }>;
+    };
+    const detailResponse = await fetch(
+      `http://127.0.0.1:${approval.port}/api/change-sets/large-set`,
+      { headers: { "X-Agent-Rewind-Token": "bounded-history-test-token" } },
+    );
+    const detail = (await detailResponse.json()) as {
+      actionCount: number;
+      affectedPathCount: number;
+      affectedPaths: string[];
+      changes: unknown[];
+      detailsTruncated: boolean;
+    };
+
+    expect(stateResponse.headers.get("cache-control")).toBe("no-store");
+    expect(state.changeSets[0]).toMatchObject({
+      actionCount: 25,
+      affectedPathCount: 25,
+      detailsTruncated: true,
+    });
+    expect(state.changeSets[0].affectedPaths).toHaveLength(5);
+    expect(state.changeSets[0].changes).toHaveLength(5);
+    expect(detailResponse.headers.get("cache-control")).toBe("no-store");
+    expect(detail).toMatchObject({
+      actionCount: 25,
+      affectedPathCount: 25,
+      detailsTruncated: false,
+    });
+    expect(detail.affectedPaths).toHaveLength(25);
+    expect(detail.changes).toHaveLength(25);
   });
 
   it("returns stable, actionable undo failure responses", async () => {
