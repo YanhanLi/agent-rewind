@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,7 +15,7 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.16.0");
+    expect(output.trim()).toBe("agent-rewind 0.17.0");
   });
 
   it("prints an empty local validation report as JSON", async () => {
@@ -49,6 +49,36 @@ describe("CLI", () => {
     expect(workspace).toBeDefined();
     await expect(lstat(workspace!)).rejects.toMatchObject({ code: "ENOENT" });
   }, 20_000);
+
+  it("exits cleanly when MCP stdin closes or the process receives SIGTERM", async () => {
+    for (const mode of ["stdin", "SIGTERM"] as const) {
+      const root = await mkdtemp(path.join(os.tmpdir(), `agent-rewind-exit-${mode}-root-`));
+      const data = await mkdtemp(path.join(os.tmpdir(), `agent-rewind-exit-${mode}-data-`));
+      temporaryDirectories.push(root, data);
+      const port = 36_200 + Math.floor(Math.random() * 300);
+      const child = spawn(
+        process.execPath,
+        [path.resolve("dist/cli.js"), "--port", String(port), root],
+        {
+          env: {
+            ...process.env,
+            AGENT_REWIND_DATA_DIR: data,
+            AGENT_REWIND_NO_BROWSER: "1",
+          },
+          stdio: "pipe",
+        },
+      );
+      try {
+        await waitForStderr(child, "Agent Rewind approval UI:");
+        const exited = waitForExit(child, 3_000);
+        if (mode === "stdin") child.stdin.end();
+        else child.kill("SIGTERM");
+        await expect(exited).resolves.toEqual({ code: 0, signal: null });
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }
+    }
+  }, 15_000);
 
   it("generates a Claude Desktop configuration", () => {
     const root = path.resolve("test-workspace");
@@ -159,3 +189,47 @@ describe("CLI", () => {
     expect(await readFile(codexHooks, "utf8")).not.toContain("apply_patch");
   });
 });
+
+function waitForStderr(child: ChildProcessWithoutNullStreams, expected: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stderr.off("data", onData);
+      child.off("exit", onExit);
+    };
+    const onData = (chunk: Buffer) => {
+      output += chunk.toString();
+      if (!output.includes(expected)) return;
+      cleanup();
+      resolve();
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(new Error(`Agent Rewind exited early (${code ?? signal}): ${output}`));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for: ${expected}`));
+    }, 5_000);
+    child.stderr.on("data", onData);
+    child.once("exit", onExit);
+  });
+}
+
+function waitForExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve, reject) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    };
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      reject(new Error("Agent Rewind did not exit cleanly"));
+    }, timeoutMs);
+    child.once("exit", onExit);
+  });
+}

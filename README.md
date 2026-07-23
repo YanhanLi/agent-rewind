@@ -158,6 +158,7 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - 符号链接和特殊文件会被快照层拒绝。
 - `rewind_delete_directory` 不能删除配置根目录；目录内任何条目无法完整快照时，删除不会开始。
 - 进程意外退出后会在下次启动对账未完成的 intent；如果目标暂时无法读取，intent 会保留到后续启动，不会自动丢弃原始快照。
+- MCP stdin 关闭或收到 SIGINT/SIGTERM 时，会先结束待审批请求并等待已获批 mutation 落账，再关闭上游子进程、本地 HTTP 服务和 SQLite。
 - 单文件快照默认上限为 16 MiB，总存储上限为 1 GiB，记录默认保留 7 天。
 - 当前是单机、单用户工具，不应作为网络服务暴露。
 
@@ -221,7 +222,5 @@ cd agent-rewind
 npm install
 npm run check
 ```
-
-GitHub Actions 会在 Node.js 22 和 24 上执行完整测试，并检查生产依赖 audit 与 npm 发布包内容。
 
 The project is licensed under the [MIT License](LICENSE).

@@ -61,6 +61,10 @@ export class Ledger {
     this.database.prepare("DELETE FROM intents WHERE id = ?").run(id);
   }
 
+  close(): void {
+    this.database.close();
+  }
+
   finalizeIntent(intentId: string, record: ChangeRecord): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {

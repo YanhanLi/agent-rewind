@@ -45,7 +45,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.16.0\n");
+    process.stdout.write("agent-rewind 0.17.0\n");
     return;
   }
   if (process.argv[2] === "report") {
@@ -100,14 +100,51 @@ async function main(): Promise<void> {
     parsed.port,
     millisecondsFromEnvironment("AGENT_REWIND_APPROVAL_TIMEOUT_MS", 120_000),
   );
-  await approval.start();
-  await startProxy({
-    roots: parsed.roots,
-    approval,
-    snapshots,
-    ledger,
-    changeSetWindowMs: millisecondsFromEnvironment("AGENT_REWIND_CHANGE_SET_WINDOW_MS", 30_000),
+  const shutdown = shutdownSignal();
+  let closeProxy: (() => Promise<void>) | undefined;
+  try {
+    await approval.start();
+    closeProxy = await startProxy({
+      roots: parsed.roots,
+      approval,
+      snapshots,
+      ledger,
+      changeSetWindowMs: millisecondsFromEnvironment("AGENT_REWIND_CHANGE_SET_WINDOW_MS", 30_000),
+    });
+    await shutdown.wait;
+  } finally {
+    shutdown.cancel();
+    try {
+      await approval.stop();
+    } finally {
+      try {
+        await closeProxy?.();
+      } finally {
+        ledger.close();
+      }
+    }
+  }
+}
+
+function shutdownSignal(): { wait: Promise<void>; cancel: () => void } {
+  let resolve!: () => void;
+  const wait = new Promise<void>((done) => {
+    resolve = done;
   });
+  const finish = () => {
+    cancel();
+    resolve();
+  };
+  const cancel = () => {
+    process.stdin.off("end", finish);
+    process.off("SIGINT", finish);
+    process.off("SIGTERM", finish);
+  };
+  process.stdin.once("end", finish);
+  process.once("SIGINT", finish);
+  process.once("SIGTERM", finish);
+  if (process.stdin.readableEnded) finish();
+  return { wait, cancel };
 }
 
 function parseArguments(args: string[]): { roots: string[]; port: number } {
