@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -263,6 +263,7 @@ describe("RewindService", () => {
       "child content\n",
     );
     expect((await lstat(path.join(restoredTarget, "empty"))).isDirectory()).toBe(true);
+    expect(await readdir(restoredTarget)).not.toContain(".agent-rewind-staging.json");
 
     const second = await fixture();
     const conflictedTarget = path.join(second.directory, "deleted-directory");
@@ -370,6 +371,38 @@ describe("RewindService", () => {
 
     await expect(rewind.undo(record.id)).resolves.toMatchObject({ status: "undone" });
     expect(await readFile(target, "utf8")).toBe("before\n");
+  });
+
+  it("finishes undoing a created directory after it was atomically quarantined", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "created-directory");
+    const before = await snapshots.capture(target);
+    await mkdir(path.join(target, "nested"), { recursive: true });
+    await writeFile(path.join(target, "nested", "content.txt"), "created by agent\n");
+    const after = await snapshots.capture(target);
+    const record = change("create_directory", [{ path: target, before, after }]);
+    ledger.add(record);
+
+    const targetHash = createHash("sha256")
+      .update(path.resolve(target))
+      .digest("hex")
+      .slice(0, 16);
+    const staging = await mkdtemp(
+      path.join(directory, `.agent-rewind-restore-${targetHash}-`),
+    );
+    await writeFile(
+      path.join(staging, ".agent-rewind-staging.json"),
+      JSON.stringify({ version: 1, target: path.resolve(target) }),
+    );
+    await rename(target, path.join(staging, "entry"));
+    const unowned = await mkdtemp(
+      path.join(directory, `.agent-rewind-restore-${targetHash}-`),
+    );
+
+    await expect(rewind.undo(record.id)).resolves.toMatchObject({ status: "undone" });
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(staging)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(unowned)).isDirectory()).toBe(true);
   });
 
   it("resumes a change-set undo after its last action was restored before a crash", async () => {

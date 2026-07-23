@@ -164,6 +164,7 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 - `rewind_delete_directory` 不能删除配置根目录；目录内任何条目无法完整快照时，删除不会开始。
 - 进程意外退出后会在下次启动对账未完成的 intent；如果目标暂时无法读取，intent 会保留到后续启动，不会自动丢弃原始快照。
 - 撤销会在写回前重新校验内容寻址 blob 的大小和 SHA-256；文件和被删目录先在目标同级构建暂存内容，再原子提交，校验或写入失败不会留下半恢复目录。
+- 撤销 Agent 新建的文件或目录时，会先把完整目标原子移动到带所有权 marker 的同级隔离目录，再清理内容；强制退出后的重试只回收 marker 与绝对目标均匹配的遗留暂存，不会按名称前缀删除用户目录。
 - 单次撤销和 change set 撤销都可识别“文件已恢复、账本仍显示 applied”的中间态并继续完成；已落账的 change-set action 不会被重复执行。
 - change set 会在修改任何路径前顺序校验全部待用快照；冲突与快照完整性失败使用不同的 API 错误码，并在审批页显示不会被定时刷新清掉的操作提示。
 - MCP stdin 关闭或收到 SIGINT/SIGTERM 时，会先结束待审批请求并等待已获批 mutation 落账，再关闭上游子进程、本地 HTTP 服务和 SQLite。
@@ -206,6 +207,7 @@ Key properties:
 - SHA-256 verification of snapshot blobs and staged atomic file/directory restoration;
 - bounded change-set snapshot preflight and actionable conflict/integrity feedback in the approval UI;
 - on-demand, timestamped undo-readiness checks, including resumable partial change sets;
+- atomic quarantine for undoing newly created paths, with ownership-verified stale staging cleanup;
 - crash recovery through persistent pre-mutation intents and startup reconciliation;
 - a dedicated recovery-review queue with explicit keep or undo decisions;
 - bounded snapshot-backed diffs with binary, directory, and large-file summaries;

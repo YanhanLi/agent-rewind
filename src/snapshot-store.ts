@@ -5,6 +5,7 @@ import path from "node:path";
 import type { EntryState, PathChange } from "./model.js";
 
 const MISSING_HASH = createHash("sha256").update("missing").digest("hex");
+const STAGING_MARKER = ".agent-rewind-staging.json";
 
 export class SnapshotStore {
   private totalBlobBytes = 0;
@@ -110,19 +111,23 @@ export class SnapshotStore {
   }
 
   async restore(change: PathChange): Promise<void> {
+    await this.cleanupRestoreStaging(change.path);
     if (!(await this.restoreIsPending(change))) return;
 
     if (change.before.kind === "missing") {
-      if (!(await this.restoreIsPending(change))) return;
-      await rm(change.path, { recursive: true, force: true });
+      const stagingDirectory = await this.createStagingDirectory(change.path);
+      try {
+        if (!(await this.restoreIsPending(change))) return;
+        await rename(change.path, path.join(stagingDirectory, "entry"));
+      } finally {
+        await rm(stagingDirectory, { recursive: true, force: true });
+      }
       return;
     }
 
     if (change.before.kind === "file") {
       const content = await this.readVerifiedBlob(change.before);
-      const parent = path.dirname(change.path);
-      await mkdir(parent, { recursive: true });
-      const stagingDirectory = await mkdtemp(path.join(parent, ".agent-rewind-restore-"));
+      const stagingDirectory = await this.createStagingDirectory(change.path);
       const stagedFile = path.join(stagingDirectory, "file");
       try {
         await writeFile(stagedFile, content, { flag: "wx" });
@@ -147,14 +152,14 @@ export class SnapshotStore {
 
     if (change.after.kind === "missing") {
       this.validateDirectorySnapshot(change.before, change.path);
-      const parent = path.dirname(change.path);
-      await mkdir(parent, { recursive: true });
-      const stagingDirectory = await mkdtemp(path.join(parent, ".agent-rewind-restore-"));
+      const stagingDirectory = await this.createStagingDirectory(change.path);
+      const stagedRoot = path.join(stagingDirectory, "directory");
       try {
-        await this.restoreDirectoryContents(stagingDirectory, change.before);
+        await mkdir(stagedRoot);
+        await this.restoreDirectoryContents(stagedRoot, change.before);
         if (!(await this.restoreIsPending(change))) return;
         try {
-          await rename(stagingDirectory, change.path);
+          await rename(stagedRoot, change.path);
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
@@ -182,6 +187,62 @@ export class SnapshotStore {
       throw new RewindConflictError(change.path, change.after.hash, current.hash);
     }
     return true;
+  }
+
+  private async createStagingDirectory(target: string): Promise<string> {
+    const parent = path.dirname(target);
+    await mkdir(parent, { recursive: true });
+    const stagingDirectory = await mkdtemp(path.join(parent, restoreStagingPrefix(target)));
+    try {
+      await writeFile(
+        path.join(stagingDirectory, STAGING_MARKER),
+        JSON.stringify({ version: 1, target: path.resolve(target) }),
+        { flag: "wx", mode: 0o600 },
+      );
+      return stagingDirectory;
+    } catch (error) {
+      await rm(stagingDirectory, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  private async cleanupRestoreStaging(target: string): Promise<void> {
+    const parent = path.dirname(target);
+    let entries;
+    try {
+      entries = await readdir(parent, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const prefix = restoreStagingPrefix(target);
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+      const candidate = path.join(parent, entry.name);
+      if (!(await this.isOwnedStagingDirectory(candidate, target))) continue;
+      await rm(candidate, { recursive: true, force: true });
+    }
+  }
+
+  private async isOwnedStagingDirectory(directory: string, target: string): Promise<boolean> {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(
+        path.join(directory, STAGING_MARKER),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      const info = await handle.stat();
+      if (!info.isFile() || info.size > 4096) return false;
+      const marker = JSON.parse(await handle.readFile("utf8")) as {
+        version?: unknown;
+        target?: unknown;
+      };
+      return marker.version === 1 && marker.target === path.resolve(target);
+    } catch {
+      return false;
+    } finally {
+      await handle?.close();
+    }
   }
 
   async undoMove(source: PathChange, destination: PathChange): Promise<void> {
@@ -402,6 +463,11 @@ function assertStableFile(
 
 function statesMatch(left: EntryState, right: EntryState): boolean {
   return left.kind === right.kind && left.hash === right.hash;
+}
+
+function restoreStagingPrefix(target: string): string {
+  const targetHash = createHash("sha256").update(path.resolve(target)).digest("hex").slice(0, 16);
+  return `.agent-rewind-restore-${targetHash}-`;
 }
 
 function validateChildName(name: string, target: string): void {
