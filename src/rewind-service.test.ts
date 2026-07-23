@@ -44,6 +44,11 @@ describe("RewindService", () => {
     });
     expect(changed.ledger.listIntents()).toHaveLength(0);
     expect(changed.ledger.get(changedIntent.id)?.status).toBe("applied");
+    expect(changed.ledger.getChangeSet(changedIntent.changeSetId)?.recoveryStatus).toBe("pending");
+    expect(changed.rewind.reviewRecoveredChangeSet(changedIntent.changeSetId).recoveryStatus).toBe(
+      "reviewed",
+    );
+    expect(changed.ledger.get(changedIntent.id)?.reviewedAt).toBeDefined();
     await changed.rewind.undo(changedIntent.id);
     expect(await readFile(changedTarget, "utf8")).toBe("before crash\n");
 

@@ -217,11 +217,21 @@ it("recovers an approved mutation after the MCP process is killed", async () => 
     await secondClient.connect(secondTransport);
     const recovered = await stateFor(secondPort, token);
     expect(recovered.changeSets).toHaveLength(1);
+    expect(recovered.recovered).toHaveLength(1);
+    expect(recovered.recovered[0]).toMatchObject({
+      id: recovered.changeSets[0].id,
+      recoveryStatus: "pending",
+    });
+    await post(secondPort, token, `/api/change-sets/${recovered.changeSets[0].id}/review`);
+    await post(secondPort, token, `/api/change-sets/${recovered.changeSets[0].id}/review`);
+    const reviewed = await stateFor(secondPort, token);
+    expect(reviewed.recovered).toHaveLength(0);
+    expect(reviewed.changeSets[0].recoveryStatus).toBe("reviewed");
     await post(secondPort, token, `/api/change-sets/${recovered.changeSets[0].id}/undo`);
     expect(await readFile(target, "utf8")).toBe("before crash\n");
 
     const report = new Ledger(path.join(data, "ledger.sqlite")).validationReport();
-    expect(report.recovery).toEqual({ recovered: 1, discarded: 0 });
+    expect(report.recovery).toEqual({ recovered: 1, discarded: 0, reviewed: 1 });
   } finally {
     await secondTransport.close();
   }
@@ -251,7 +261,13 @@ function proxyTransport(
 interface UiState {
   pending: Array<{ id: string; summary: string; changeSetLabel?: string }>;
   changes: Array<{ id: string; summary: string }>;
-  changeSets: Array<{ id: string; label?: string; actionCount: number }>;
+  changeSets: Array<{
+    id: string;
+    label?: string;
+    actionCount: number;
+    recoveryStatus?: "pending" | "reviewed";
+  }>;
+  recovered: Array<{ id: string; recoveryStatus: "pending" }>;
 }
 
 async function stateFor(port: number, token: string): Promise<UiState> {

@@ -142,6 +142,8 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind report --j
 
 每个已批准的变更会在执行前写入本地 SQLite intent。正常完成时，intent 和正式变更记录在同一事务中交接；如果 Agent Rewind、客户端或系统在文件操作后退出，下一次启动会先比较 intent 中的原始快照与磁盘现状：状态已变化则补全可撤销记录，状态未变化则丢弃未执行的 intent。恢复数量会显示在启动日志和 `agent-rewind report` 中。
 
+补全的记录会进入审批页独立的 **Recovered changes** 队列，不会静默混入普通历史。检查受影响路径后，可以选择 `Keep changes` 确认保留，也可以直接 `Undo set`；确认保留只结束待检查状态，不会移除之后的撤销能力。
+
 这项机制处理的是“已进入 Agent Rewind 的操作在执行过程中被中断”，不是文件系统事务，也不能判断进程退出后由其他程序产生的写入。因此恢复出的记录在撤销前仍会执行冲突检查，用户应先查看变更内容再撤销。
 
 ### 安全边界
@@ -185,6 +187,7 @@ Key properties:
 - recursive directory deletion with restorable file and empty-directory manifests;
 - local SQLite ledger and content-addressed snapshots;
 - crash recovery through persistent pre-mutation intents and startup reconciliation;
+- a dedicated recovery-review queue with explicit keep or undo decisions;
 - no account or cloud service.
 - safe Claude Desktop install/uninstall with dry-run, backup, and atomic replacement.
 - local-only, privacy-minimized validation metrics via `agent-rewind report`.

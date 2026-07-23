@@ -135,6 +135,7 @@ export class Ledger {
       recovery: {
         recovered: count("intent_recovered"),
         discarded: count("intent_discarded"),
+        reviewed: count("recovery_reviewed"),
       },
       tools: Object.fromEntries(
         Object.entries(tools).sort(([left], [right]) => left.localeCompare(right)),
@@ -158,6 +159,26 @@ export class Ledger {
 
   listByChangeSet(changeSetId: string): ChangeRecord[] {
     return this.allRecords().filter((record) => record.changeSetId === changeSetId);
+  }
+
+  markRecoveryReviewed(changeSetId: string, reviewedAt: string): ChangeSetView {
+    const changes = this.listByChangeSet(changeSetId);
+    if (changes.length === 0) throw new Error(`Unknown change set: ${changeSetId}`);
+    if (!changes.some((change) => change.recoveredAt)) {
+      throw new Error("This change set was not recovered after an interruption");
+    }
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const change of changes) {
+        if (!change.recoveredAt || change.reviewedAt) continue;
+        this.update({ ...change, reviewedAt });
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getChangeSet(changeSetId)!;
   }
 
   getChangeSet(changeSetId: string): ChangeSetView | undefined {
@@ -247,6 +268,14 @@ function toChangeSet(id: string, input: ChangeRecord[]): ChangeSetView {
     createdAt: changes[0].createdAt,
     updatedAt: changes.at(-1)!.createdAt,
     status,
+    recoveryStatus:
+      changes.some((change) => change.recoveredAt)
+        ? changes
+            .filter((change) => change.recoveredAt)
+            .every((change) => change.reviewedAt || change.status === "undone")
+          ? "reviewed"
+          : "pending"
+        : undefined,
     actionCount: changes.length,
     affectedPaths: [...new Set(changes.flatMap((change) => change.paths.map((item) => item.path)))],
     changes,

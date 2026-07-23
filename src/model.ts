@@ -16,6 +16,8 @@ export interface ChangeRecord {
   tool: string;
   summary: string;
   createdAt: string;
+  recoveredAt?: string;
+  reviewedAt?: string;
   status: "applied" | "undone" | "conflict";
   paths: PathChange[];
 }
@@ -36,6 +38,7 @@ export interface ChangeSetView {
   createdAt: string;
   updatedAt: string;
   status: "applied" | "undone" | "conflict" | "partial";
+  recoveryStatus?: "pending" | "reviewed";
   actionCount: number;
   affectedPaths: string[];
   changes: ChangeRecord[];
@@ -65,6 +68,7 @@ export type LocalEventType =
   | "change_applied"
   | "intent_recovered"
   | "intent_discarded"
+  | "recovery_reviewed"
   | "undo_started"
   | "undo_succeeded"
   | "undo_conflict";
@@ -95,6 +99,6 @@ export interface ValidationReport {
     conflicts: number;
   };
   undo: { attempted: number; succeeded: number; conflicts: number };
-  recovery: { recovered: number; discarded: number };
+  recovery: { recovered: number; discarded: number; reviewed: number };
   tools: Record<string, number>;
 }

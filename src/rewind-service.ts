@@ -34,6 +34,7 @@ export class RewindService {
           after: after[index],
         }));
         if (paths.some((change) => change.before.hash !== change.after.hash)) {
+          const recoveredAt = new Date().toISOString();
           this.ledger.finalizeIntent(intent.id, {
             id: intent.id,
             changeSetId: intent.changeSetId,
@@ -41,6 +42,7 @@ export class RewindService {
             tool: intent.tool,
             summary: intent.summary,
             createdAt: intent.createdAt,
+            recoveredAt,
             status: "applied",
             paths,
           });
@@ -57,6 +59,18 @@ export class RewindService {
       }
     }
     return { recovered, discarded, pending };
+  }
+
+  reviewRecoveredChangeSet(id: string): ChangeSetView {
+    const existing = this.ledger.getChangeSet(id);
+    if (!existing) throw new Error(`Unknown change set: ${id}`);
+    if (!existing.recoveryStatus) {
+      throw new Error("This change set was not recovered after an interruption");
+    }
+    if (existing.recoveryStatus === "reviewed") return existing;
+    const changeSet = this.ledger.markRecoveryReviewed(id, new Date().toISOString());
+    this.ledger.recordEvent({ type: "recovery_reviewed", target: "change_set" });
+    return changeSet;
   }
 
   async undoChangeSet(id: string): Promise<ChangeSetView> {
