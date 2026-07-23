@@ -13,7 +13,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createTwoFilesPatch } from "diff";
 import type { ApprovalServer } from "./approval-server.js";
-import type { ChangeRecord, EntryState, PathChange } from "./model.js";
+import type { ChangeIntent, ChangeRecord, EntryState, PathChange } from "./model.js";
 import type { Ledger } from "./ledger.js";
 import type { SnapshotStore } from "./snapshot-store.js";
 
@@ -39,7 +39,7 @@ interface ProxyOptions {
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
-  const upstream = new Client({ name: "agent-rewind", version: "0.12.0" });
+  const upstream = new Client({ name: "agent-rewind", version: "0.13.0" });
   const changeSets = new ChangeSetTracker(options.changeSetWindowMs);
   const require = createRequire(import.meta.url);
   const filesystemPackage = require.resolve("@modelcontextprotocol/server-filesystem/package.json");
@@ -52,7 +52,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   await upstream.connect(upstreamTransport);
 
   const server = new Server(
-    { name: "agent-rewind", version: "0.12.0" },
+    { name: "agent-rewind", version: "0.13.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -199,39 +199,71 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
         return failure("The target changed while approval was pending. Review and retry.");
       }
 
-      const result =
-        name === DELETE_FILE || name === DELETE_DIRECTORY
-          ? await deleteTarget(name, targets[0])
-          : ((await upstream.callTool(request.params)) as CallToolResult);
-      if (result.isError) return result;
-      const after = await Promise.all(targets.map((target) => options.snapshots.capture(target)));
-      const paths: PathChange[] = targets.map((target, index) => ({
-        path: target,
-        before: before[index],
-        after: after[index],
-      }));
-      if (paths.some((item) => item.before.hash !== item.after.hash)) {
-        const changeSet = changeSets.next();
-        const record: ChangeRecord = {
-          id: randomUUID(),
-          changeSetId: changeSet.id,
-          changeSetLabel: changeSet.label,
-          tool: name,
-          summary,
-          createdAt: new Date().toISOString(),
-          status: "applied",
-          paths,
-        };
-        options.ledger.add(record);
-        options.ledger.recordEvent({ type: "change_applied", tool: name });
+      const changeSet = changeSets.next();
+      const intent: ChangeIntent = {
+        id: randomUUID(),
+        changeSetId: changeSet.id,
+        changeSetLabel: changeSet.label,
+        tool: name,
+        summary,
+        createdAt: new Date().toISOString(),
+        paths: targets.map((target, index) => ({ path: target, before: before[index] })),
+      };
+      options.ledger.beginIntent(intent);
+
+      let result: CallToolResult | undefined;
+      let executionError: unknown;
+      try {
+        result =
+          name === DELETE_FILE || name === DELETE_DIRECTORY
+            ? await deleteTarget(name, targets[0])
+            : ((await upstream.callTool(request.params)) as CallToolResult);
+        if (process.env.AGENT_REWIND_TEST_CRASH_AFTER_MUTATION === "1") {
+          process.kill(process.pid, "SIGKILL");
+        }
+      } catch (error) {
+        executionError = error;
       }
-      return result;
+
+      await settleIntent(intent, targets, before, options);
+      if (executionError) throw executionError;
+      return result!;
     } catch (error) {
       return failure((error as Error).message);
     }
   });
 
   await server.connect(new StdioServerTransport());
+}
+
+async function settleIntent(
+  intent: ChangeIntent,
+  targets: string[],
+  before: EntryState[],
+  options: Pick<ProxyOptions, "snapshots" | "ledger">,
+): Promise<void> {
+  const after = await Promise.all(targets.map((target) => options.snapshots.capture(target)));
+  const paths: PathChange[] = targets.map((target, index) => ({
+    path: target,
+    before: before[index],
+    after: after[index],
+  }));
+  if (!paths.some((item) => item.before.hash !== item.after.hash)) {
+    options.ledger.discardIntent(intent.id);
+    return;
+  }
+  const record: ChangeRecord = {
+    id: intent.id,
+    changeSetId: intent.changeSetId,
+    changeSetLabel: intent.changeSetLabel,
+    tool: intent.tool,
+    summary: intent.summary,
+    createdAt: intent.createdAt,
+    status: "applied",
+    paths,
+  };
+  options.ledger.finalizeIntent(intent.id, record);
+  options.ledger.recordEvent({ type: "change_applied", tool: intent.tool });
 }
 
 class ChangeSetTracker {

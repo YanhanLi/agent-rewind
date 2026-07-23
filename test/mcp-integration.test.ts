@@ -186,6 +186,68 @@ it("approves, executes, records, and undoes a real filesystem MCP call", async (
   }
 }, 20_000);
 
+it("recovers an approved mutation after the MCP process is killed", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-crash-root-"));
+  const data = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-crash-data-"));
+  directories.push(root, data);
+  const target = path.join(root, "interrupted.txt");
+  await writeFile(target, "before crash\n");
+  const token = "crash-recovery-test-token";
+  const firstPort = 35_100 + Math.floor(Math.random() * 200);
+  const firstTransport = proxyTransport(root, data, token, firstPort, {
+    AGENT_REWIND_TEST_CRASH_AFTER_MUTATION: "1",
+  });
+  const firstClient = new Client({ name: "crash-test", version: "1.0.0" });
+
+  await firstClient.connect(firstTransport);
+  const interruptedCall = firstClient.callTool({
+    name: "write_file",
+    arguments: { path: target, content: "after crash\n" },
+  });
+  const pending = await waitForPending(firstPort, token);
+  await post(firstPort, token, `/api/approvals/${pending.pending[0].id}/approve`);
+  await expect(interruptedCall).rejects.toThrow();
+  await firstTransport.close().catch(() => undefined);
+  expect(await readFile(target, "utf8")).toBe("after crash\n");
+
+  const secondPort = firstPort + 300;
+  const secondTransport = proxyTransport(root, data, token, secondPort);
+  const secondClient = new Client({ name: "recovery-test", version: "1.0.0" });
+  try {
+    await secondClient.connect(secondTransport);
+    const recovered = await stateFor(secondPort, token);
+    expect(recovered.changeSets).toHaveLength(1);
+    await post(secondPort, token, `/api/change-sets/${recovered.changeSets[0].id}/undo`);
+    expect(await readFile(target, "utf8")).toBe("before crash\n");
+
+    const report = new Ledger(path.join(data, "ledger.sqlite")).validationReport();
+    expect(report.recovery).toEqual({ recovered: 1, discarded: 0 });
+  } finally {
+    await secondTransport.close();
+  }
+}, 20_000);
+
+function proxyTransport(
+  root: string,
+  data: string,
+  token: string,
+  port: number,
+  extraEnvironment: Record<string, string> = {},
+): StdioClientTransport {
+  return new StdioClientTransport({
+    command: process.execPath,
+    args: [path.resolve("dist/cli.js"), "--port", String(port), root],
+    env: {
+      ...process.env,
+      AGENT_REWIND_DATA_DIR: data,
+      AGENT_REWIND_TOKEN: token,
+      AGENT_REWIND_NO_BROWSER: "1",
+      ...extraEnvironment,
+    } as Record<string, string>,
+    stderr: "pipe",
+  });
+}
+
 interface UiState {
   pending: Array<{ id: string; summary: string; changeSetLabel?: string }>;
   changes: Array<{ id: string; summary: string }>;

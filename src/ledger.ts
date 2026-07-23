@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  ChangeIntent,
   ChangeRecord,
   ChangeSetView,
   LocalEvent,
@@ -28,6 +29,11 @@ export class Ledger {
         tool TEXT,
         target TEXT
       );
+      CREATE TABLE IF NOT EXISTS intents (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        payload TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS events_created_at ON events (created_at)
     `);
   }
@@ -36,6 +42,37 @@ export class Ledger {
     this.database
       .prepare("INSERT INTO changes (id, created_at, status, payload) VALUES (?, ?, ?, ?)")
       .run(record.id, record.createdAt, record.status, JSON.stringify(record));
+  }
+
+  beginIntent(intent: ChangeIntent): void {
+    this.database
+      .prepare("INSERT INTO intents (id, created_at, payload) VALUES (?, ?, ?)")
+      .run(intent.id, intent.createdAt, JSON.stringify(intent));
+  }
+
+  listIntents(): ChangeIntent[] {
+    const rows = this.database
+      .prepare("SELECT payload FROM intents ORDER BY created_at ASC")
+      .all() as Array<{ payload: string }>;
+    return rows.map((row) => JSON.parse(row.payload) as ChangeIntent);
+  }
+
+  discardIntent(id: string): void {
+    this.database.prepare("DELETE FROM intents WHERE id = ?").run(id);
+  }
+
+  finalizeIntent(intentId: string, record: ChangeRecord): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database
+        .prepare("INSERT INTO changes (id, created_at, status, payload) VALUES (?, ?, ?, ?)")
+        .run(record.id, record.createdAt, record.status, JSON.stringify(record));
+      this.database.prepare("DELETE FROM intents WHERE id = ?").run(intentId);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   update(record: ChangeRecord): void {
@@ -94,6 +131,10 @@ export class Ledger {
         attempted: count("undo_started"),
         succeeded: count("undo_succeeded"),
         conflicts: count("undo_conflict"),
+      },
+      recovery: {
+        recovered: count("intent_recovered"),
+        discarded: count("intent_discarded"),
       },
       tools: Object.fromEntries(
         Object.entries(tools).sort(([left], [right]) => left.localeCompare(right)),
@@ -157,6 +198,13 @@ export class Ledger {
         addEntryBlobs(change.before, blobs);
         addEntryBlobs(change.after, blobs);
       }
+    }
+    const intents = this.database.prepare("SELECT payload FROM intents").all() as Array<{
+      payload: string;
+    }>;
+    for (const row of intents) {
+      const intent = JSON.parse(row.payload) as ChangeIntent;
+      for (const change of intent.paths) addEntryBlobs(change.before, blobs);
     }
     return blobs;
   }

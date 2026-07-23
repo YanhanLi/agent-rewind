@@ -20,6 +20,45 @@ export class RewindService {
     this.ledger.recordEvent(event);
   }
 
+  async recoverIntents(): Promise<{ recovered: number; discarded: number; pending: number }> {
+    let recovered = 0;
+    let discarded = 0;
+    let pending = 0;
+    for (const intent of this.ledger.listIntents()) {
+      try {
+        const after = await Promise.all(
+          intent.paths.map((change) => this.snapshots.capture(change.path)),
+        );
+        const paths: PathChange[] = intent.paths.map((change, index) => ({
+          ...change,
+          after: after[index],
+        }));
+        if (paths.some((change) => change.before.hash !== change.after.hash)) {
+          this.ledger.finalizeIntent(intent.id, {
+            id: intent.id,
+            changeSetId: intent.changeSetId,
+            changeSetLabel: intent.changeSetLabel,
+            tool: intent.tool,
+            summary: intent.summary,
+            createdAt: intent.createdAt,
+            status: "applied",
+            paths,
+          });
+          this.ledger.recordEvent({ type: "intent_recovered", tool: intent.tool });
+          this.ledger.recordEvent({ type: "change_applied", tool: intent.tool });
+          recovered += 1;
+        } else {
+          this.ledger.discardIntent(intent.id);
+          this.ledger.recordEvent({ type: "intent_discarded", tool: intent.tool });
+          discarded += 1;
+        }
+      } catch {
+        pending += 1;
+      }
+    }
+    return { recovered, discarded, pending };
+  }
+
   async undoChangeSet(id: string): Promise<ChangeSetView> {
     this.ledger.recordEvent({ type: "undo_started", target: "change_set" });
     try {

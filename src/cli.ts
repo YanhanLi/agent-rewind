@@ -45,7 +45,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.12.0\n");
+    process.stdout.write("agent-rewind 0.13.0\n");
     return;
   }
   if (process.argv[2] === "report") {
@@ -87,8 +87,14 @@ async function main(): Promise<void> {
   const ledger = new Ledger(path.join(dataDirectory, "ledger.sqlite"));
   const retentionDays = positiveNumberFromEnvironment("AGENT_REWIND_RETENTION_DAYS", 7);
   ledger.pruneBefore(new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000));
-  await snapshots.garbageCollect(ledger.referencedBlobs());
   const rewind = new RewindService(ledger, snapshots);
+  const recovery = await rewind.recoverIntents();
+  await snapshots.garbageCollect(ledger.referencedBlobs());
+  if (recovery.recovered > 0 || recovery.discarded > 0 || recovery.pending > 0) {
+    process.stderr.write(
+      `Agent Rewind recovery: ${recovery.recovered} recovered, ${recovery.discarded} unchanged, ${recovery.pending} pending.\n`,
+    );
+  }
   const approval = new ApprovalServer(
     rewind,
     parsed.port,
@@ -298,6 +304,7 @@ function formatReport(report: ValidationReport): string {
     `Approvals: ${report.approvals.requested} requested, ${report.approvals.approved} approved, ${report.approvals.changeSetApproved} set-approved, ${report.approvals.sessionApproved} folder-approved, ${report.approvals.autoApproved} auto-approved, ${report.approvals.rejected} rejected, ${report.approvals.expired} expired`,
     `Changes: ${report.changes.actions} actions in ${report.changes.changeSets} sets; ${report.changes.applied} applied, ${report.changes.undone} undone, ${report.changes.conflicts} conflicts`,
     `Undo: ${report.undo.attempted} attempted, ${report.undo.succeeded} succeeded, ${report.undo.conflicts} conflicts`,
+    `Recovery: ${report.recovery.recovered} recovered, ${report.recovery.discarded} unchanged intents discarded`,
     `Tools: ${tools || "none"}`,
     "Privacy: local aggregate only; event rows contain no paths, file contents, prompts, or arguments.",
     "",

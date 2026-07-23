@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger } from "./ledger.js";
-import type { ChangeRecord } from "./model.js";
+import type { ChangeIntent, ChangeRecord } from "./model.js";
 import { RewindService } from "./rewind-service.js";
 import { SnapshotStore } from "./snapshot-store.js";
 
@@ -25,6 +25,62 @@ async function fixture() {
 }
 
 describe("RewindService", () => {
+  it("reconciles changed and unchanged write-ahead intents", async () => {
+    const changed = await fixture();
+    const changedTarget = path.join(changed.directory, "interrupted.txt");
+    await writeFile(changedTarget, "before crash\n");
+    const changedBefore = await changed.snapshots.capture(changedTarget);
+    const changedIntent = intent("write_file", changedTarget, changedBefore);
+    changed.ledger.beginIntent(changedIntent);
+    await writeFile(changedTarget, "after crash\n");
+
+    expect(changed.ledger.referencedBlobs()).toContain(
+      changedBefore.kind === "file" ? changedBefore.blob : "",
+    );
+    await expect(changed.rewind.recoverIntents()).resolves.toEqual({
+      recovered: 1,
+      discarded: 0,
+      pending: 0,
+    });
+    expect(changed.ledger.listIntents()).toHaveLength(0);
+    expect(changed.ledger.get(changedIntent.id)?.status).toBe("applied");
+    await changed.rewind.undo(changedIntent.id);
+    expect(await readFile(changedTarget, "utf8")).toBe("before crash\n");
+
+    const unchanged = await fixture();
+    const unchangedTarget = path.join(unchanged.directory, "not-executed.txt");
+    await writeFile(unchangedTarget, "unchanged\n");
+    const unchangedBefore = await unchanged.snapshots.capture(unchangedTarget);
+    unchanged.ledger.beginIntent(intent("write_file", unchangedTarget, unchangedBefore));
+
+    await expect(unchanged.rewind.recoverIntents()).resolves.toEqual({
+      recovered: 0,
+      discarded: 1,
+      pending: 0,
+    });
+    expect(unchanged.ledger.listIntents()).toHaveLength(0);
+    expect(unchanged.ledger.list()).toHaveLength(0);
+  });
+
+  it("keeps an intent and its snapshot when startup reconciliation cannot inspect the target", async () => {
+    const { directory, snapshots, ledger, rewind } = await fixture();
+    const target = path.join(directory, "unreadable-target.txt");
+    await writeFile(target, "before crash\n");
+    const before = await snapshots.capture(target);
+    const pendingIntent = intent("write_file", target, before);
+    ledger.beginIntent(pendingIntent);
+    await rm(target);
+    await symlink(path.join(directory, "missing-link-target"), target);
+
+    await expect(rewind.recoverIntents()).resolves.toEqual({
+      recovered: 0,
+      discarded: 0,
+      pending: 1,
+    });
+    expect(ledger.listIntents()).toEqual([pendingIntent]);
+    expect(ledger.referencedBlobs()).toContain(before.kind === "file" ? before.blob : "");
+  });
+
   it("restores an overwritten file and verifies the result", async () => {
     const { directory, snapshots, ledger, rewind } = await fixture();
     const target = path.join(directory, "notes.txt");
@@ -310,5 +366,21 @@ function change(
     createdAt: new Date().toISOString(),
     status: "applied",
     paths,
+  };
+}
+
+function intent(
+  tool: string,
+  target: string,
+  before: ChangeIntent["paths"][number]["before"],
+): ChangeIntent {
+  const id = randomUUID();
+  return {
+    id,
+    changeSetId: id,
+    tool,
+    summary: "test intent",
+    createdAt: new Date().toISOString(),
+    paths: [{ path: target, before }],
   };
 }

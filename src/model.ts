@@ -20,6 +20,16 @@ export interface ChangeRecord {
   paths: PathChange[];
 }
 
+export interface ChangeIntent {
+  id: string;
+  changeSetId: string;
+  changeSetLabel?: string;
+  tool: string;
+  summary: string;
+  createdAt: string;
+  paths: Array<{ path: string; before: EntryState }>;
+}
+
 export interface ChangeSetView {
   id: string;
   label?: string;
@@ -53,6 +63,8 @@ export type LocalEventType =
   | "approval_rejected"
   | "approval_expired"
   | "change_applied"
+  | "intent_recovered"
+  | "intent_discarded"
   | "undo_started"
   | "undo_succeeded"
   | "undo_conflict";
@@ -83,5 +95,6 @@ export interface ValidationReport {
     conflicts: number;
   };
   undo: { attempted: number; succeeded: number; conflicts: number };
+  recovery: { recovered: number; discarded: number };
   tools: Record<string, number>;
 }
