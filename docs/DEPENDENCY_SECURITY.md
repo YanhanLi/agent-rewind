@@ -4,7 +4,7 @@
 
 本页如实记录上游依赖告警，而不是依靠仅在仓库根目录生效的 `overrides` 隐藏它们。Agent Rewind 作为另一个项目的依赖安装时，npm 不会传递这类覆盖规则，因此本地开发环境应与真实使用者解析出相同的依赖树。
 
-Agent Rewind 0.30.0 的全新安装可能出现：
+Agent Rewind 0.31.0 的全新安装可能出现：
 
 - `@modelcontextprotocol/server-filesystem` 声明的 `glob@10.5.0` 弃用告警；
 - `@modelcontextprotocol/sdk` 引入的 `@hono/node-server@1.19.14` moderate 告警。npm 可能按受影响的依赖路径多次计算同一条 advisory。
@@ -29,7 +29,7 @@ This document records known upstream dependency warnings instead of hiding them 
 
 ## Current findings
 
-As of Agent Rewind 0.30.0, a fresh install may show:
+As of Agent Rewind 0.31.0, a fresh install may show:
 
 - a deprecation warning for `glob@10.5.0`, declared by `@modelcontextprotocol/server-filesystem`;
 - moderate findings for `@hono/node-server@1.19.14`, pulled in by `@modelcontextprotocol/sdk` (npm may count the same advisory once for each affected dependency path).

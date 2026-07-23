@@ -56,13 +56,28 @@ npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind demo --aut
 
 ### 快速开始
 
-需要 Node.js 22.5 或更高版本：
+需要 Node.js 22.5 或更高版本。选择一个客户端，先检查完整写入计划，再执行同一条命令去掉 `--dry-run`：
+
+```bash
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup claude --dry-run /绝对路径/允许访问的目录
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup claude /绝对路径/允许访问的目录
+
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup opencode --guard --dry-run /绝对路径/允许访问的目录
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup opencode --guard /绝对路径/允许访问的目录
+
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup codex --guard --dry-run /绝对路径/允许访问的目录
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup codex --guard /绝对路径/允许访问的目录
+```
+
+`setup` 会先检查目录、现有配置和 guard 文件冲突，再配置 MCP、安装可选 guard 并复核结果。Codex setup 完成后仍需重启 Codex，在 `/hooks` 中审查并信任 Agent Rewind hook。OpenCode/Codex 的 `--guard` 会阻断部分内置编辑工具，但 shell 写入仍在保护范围外。
+
+重启客户端后运行诊断，并按输出做一次测试文件修改：
 
 ```bash
 npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind doctor /绝对路径/允许访问的目录
 ```
 
-选择正在使用的客户端。所有安装命令都支持 `--dry-run`：
+如需逐步控制配置与 guard，原有安装命令继续可用：
 
 ```bash
 npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install claude --dry-run /绝对路径/允许访问的目录
@@ -244,21 +259,22 @@ Key properties:
 - local-only, privacy-minimized validation metrics via `agent-rewind report`.
 - safe client configuration for Claude Desktop, OpenCode JSONC, and Codex `config.toml` via the official Codex CLI.
 - optional, reversible OpenCode and Codex guards that route direct edit tools toward Agent Rewind MCP.
+- one-command, preflighted client setup with exact dry-run output and post-install verification.
 
-Run the diagnostic, inspect the dry-run, then install:
+Choose one client, inspect the complete setup plan, then rerun without `--dry-run`:
 
 ```bash
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind demo
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind doctor /absolute/allowed/directory
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install claude --dry-run /absolute/allowed/directory
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install claude /absolute/allowed/directory
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install opencode /absolute/allowed/directory
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind install codex /absolute/allowed/directory
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard opencode
-npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind guard codex
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup claude --dry-run /absolute/allowed/directory
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup claude /absolute/allowed/directory
+
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup opencode --guard --dry-run /absolute/allowed/directory
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup opencode --guard /absolute/allowed/directory
+
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup codex --guard --dry-run /absolute/allowed/directory
+npm exec --yes --package=github:YanhanLi/agent-rewind -- agent-rewind setup codex --guard /absolute/allowed/directory
 ```
 
-Guard mode blocks OpenCode's direct edit tools and Codex `apply_patch`, but shell writes remain outside the proxy. See the Chinese section and [guard-mode documentation](docs/GUARD_MODE.md) for exact boundaries.
+Setup preflights roots and guard conflicts, verifies the resulting configuration, and remains idempotent. Restart the client afterward and run `agent-rewind doctor /absolute/allowed/directory`. Codex users must also review and trust the hook in `/hooks`. Guard mode blocks OpenCode's direct edit tools and Codex `apply_patch`, but shell writes remain outside the proxy. See the Chinese section and [guard-mode documentation](docs/GUARD_MODE.md) for exact boundaries.
 
 ## Development
 

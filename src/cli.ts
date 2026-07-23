@@ -46,7 +46,7 @@ import { SnapshotStore } from "./snapshot-store.js";
 
 async function main(): Promise<void> {
   if (process.argv[2] === "--version" || process.argv[2] === "-v") {
-    process.stdout.write("agent-rewind 0.30.0\n");
+    process.stdout.write("agent-rewind 0.31.0\n");
     return;
   }
   if (process.argv[2] === "report") {
@@ -63,6 +63,10 @@ async function main(): Promise<void> {
   }
   if (process.argv[2] === "config") {
     printClientConfig(process.argv[3], process.argv.slice(4));
+    return;
+  }
+  if (process.argv[2] === "setup") {
+    await setupClient(process.argv[3], process.argv.slice(4));
     return;
   }
   if (process.argv[2] === "install") {
@@ -167,7 +171,7 @@ function parseArguments(args: string[]): { roots: string[]; port: number } {
       }
     } else if (args[index] === "--help" || args[index] === "-h") {
       process.stderr.write(
-        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind demo [--auto]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config <claude|opencode|codex> <allowed-directory> [...]\n       agent-rewind install <claude|opencode|codex> [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall <claude|opencode|codex> [--dry-run]\n       agent-rewind guard <opencode|codex> [--dry-run]\n       agent-rewind unguard <opencode|codex> [--dry-run]\n       agent-rewind --version\n",
+        "Usage: agent-rewind [--port 3219] <allowed-directory> [...]\n       agent-rewind demo [--auto]\n       agent-rewind doctor <allowed-directory> [...]\n       agent-rewind report [--json]\n       agent-rewind config <claude|opencode|codex> <allowed-directory> [...]\n       agent-rewind setup <claude|opencode|codex> [--guard] [--dry-run] <allowed-directory> [...]\n       agent-rewind install <claude|opencode|codex> [--dry-run] <allowed-directory> [...]\n       agent-rewind uninstall <claude|opencode|codex> [--dry-run]\n       agent-rewind guard <opencode|codex> [--dry-run]\n       agent-rewind unguard <opencode|codex> [--dry-run]\n       agent-rewind --version\n",
       );
       process.exit(0);
     } else {
@@ -191,24 +195,94 @@ function printClientConfig(client: string | undefined, args: string[]): void {
   process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
 }
 
+async function setupClient(client: string | undefined, args: string[]): Promise<void> {
+  if (!isClient(client)) throw new Error("setup requires claude, opencode, or codex");
+  const { dryRun, guard, values } = parseSetupOptions(args);
+  if (guard && client === "claude") {
+    throw new Error("setup claude does not support --guard; Claude Desktop has no managed guard");
+  }
+  const guardClient = guard ? (client as Exclude<ClientName, "claude">) : undefined;
+  const roots = await writableRoots(values, `setup ${client}`);
+  if (client === "codex") {
+    const state = await inspectCodexConfig();
+    if (state === "unavailable") throw new Error("Codex CLI was not found; install or open Codex first");
+    if (state === "invalid") throw new Error("Codex MCP configuration could not be inspected safely");
+  }
+
+  const mcpPreview = await configureClient(client, roots, true);
+  const guardPreview = guardClient ? await configureGuard(guardClient, true) : undefined;
+  if (dryRun) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          dryRun: true,
+          client,
+          allowedDirectories: roots,
+          mcp: {
+            filename: mcpPreview.filename,
+            willChange: mcpPreview.changed,
+            config: mcpPreview.config,
+          },
+          guard: guardPreview
+            ? {
+                requested: true,
+                willChange: guardPreview.changed,
+                files: guardPreview.files,
+                preview: guardPreview.preview,
+              }
+            : { requested: false },
+          boundary: "Shell writes remain outside Agent Rewind guard mode.",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return;
+  }
+
+  const mcp = await configureClient(client, roots, false);
+  let installedGuard: Awaited<ReturnType<typeof configureGuard>> | undefined;
+  if (guardClient) {
+    try {
+      installedGuard = await configureGuard(guardClient, false);
+    } catch (error) {
+      throw new Error(
+        `MCP configuration is ${mcp.changed ? "updated" : "already configured"}, but guard installation failed: ${(error as Error).message}. Fix the guard conflict and rerun the same setup command.`,
+        { cause: error },
+      );
+    }
+  }
+
+  const mcpState = await inspectClient(client);
+  if (mcpState !== "configured") {
+    throw new Error(`Setup verification failed: ${clientLabel(client)} MCP state is ${mcpState}`);
+  }
+  if (guardClient && (await inspectGuard(guardClient)) !== "configured") {
+    throw new Error(`Setup verification failed: ${clientLabel(client)} guard is not configured`);
+  }
+
+  const lines = [
+    `Agent Rewind setup complete for ${clientLabel(client)}.`,
+    `MCP: ${mcp.changed ? "updated" : "already configured"} at ${mcp.filename}`,
+    guard
+      ? `Guard: ${installedGuard!.changed ? "installed" : "already configured"} at ${installedGuard!.files.join(", ")}`
+      : client === "claude"
+        ? "Guard: not applicable to Claude Desktop."
+        : "Guard: not requested; built-in edit tools can bypass Agent Rewind.",
+    `Allowed directories: ${roots.join(", ")}`,
+    client === "codex"
+      ? "Next: restart Codex, open /hooks, review and trust the Agent Rewind hook, then edit a test file."
+      : `Next: restart ${clientLabel(client)}, then edit a test file and confirm the local approval page opens.`,
+    "Boundary: shell writes remain outside Agent Rewind guard mode.",
+  ];
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 async function installClient(client: string | undefined, args: string[]): Promise<void> {
   if (!isClient(client)) throw new Error("install requires claude, opencode, or codex");
   const { dryRun, values } = parseDryRun(args);
-  if (values.length === 0) throw new Error(`install ${client} requires at least one allowed directory`);
-  const roots = [...new Set(values.map((value) => path.resolve(value)))];
-  for (const root of roots) {
-    try {
-      await access(root, constants.R_OK | constants.W_OK);
-    } catch {
-      throw new Error(`Allowed directory is not readable/writable: ${root}`);
-    }
-  }
-  const result =
-    client === "claude"
-      ? await installClaudeConfig(roots, { dryRun })
-      : client === "opencode"
-        ? await installOpenCodeConfig(roots, { dryRun })
-        : await installCodexConfig(roots, { dryRun });
+  const roots = await writableRoots(values, `install ${client}`);
+  const result = await configureClient(client, roots, dryRun);
   if (dryRun) {
     process.stdout.write(
       client === "codex"
@@ -224,6 +298,45 @@ async function installClient(client: string | undefined, args: string[]): Promis
   process.stdout.write(`Updated ${clientLabel(client)} configuration: ${result.filename}\n`);
   if (result.backup) process.stdout.write(`Backup: ${result.backup}\n`);
   process.stdout.write(`Restart ${clientLabel(client)} to apply the change.\n`);
+}
+
+async function configureClient(client: ClientName, roots: string[], dryRun: boolean) {
+  return client === "claude"
+    ? installClaudeConfig(roots, { dryRun })
+    : client === "opencode"
+      ? installOpenCodeConfig(roots, { dryRun })
+      : installCodexConfig(roots, { dryRun });
+}
+
+async function configureGuard(client: Exclude<ClientName, "claude">, dryRun: boolean) {
+  return client === "opencode"
+    ? installOpenCodeGuard({ dryRun })
+    : installCodexGuard({ dryRun });
+}
+
+async function inspectClient(client: ClientName): Promise<string> {
+  return client === "claude"
+    ? inspectClaudeConfig()
+    : client === "opencode"
+      ? inspectOpenCodeConfig()
+      : inspectCodexConfig();
+}
+
+async function inspectGuard(client: Exclude<ClientName, "claude">): Promise<string> {
+  return client === "opencode" ? inspectOpenCodeGuard() : inspectCodexGuard();
+}
+
+async function writableRoots(values: string[], command: string): Promise<string[]> {
+  if (values.length === 0) throw new Error(`${command} requires at least one allowed directory`);
+  const roots = [...new Set(values.map((value) => path.resolve(value)))];
+  for (const root of roots) {
+    try {
+      await access(root, constants.R_OK | constants.W_OK);
+    } catch {
+      throw new Error(`Allowed directory is not readable/writable: ${root}`);
+    }
+  }
+  return roots;
 }
 
 async function uninstallClient(client: string | undefined, args: string[]): Promise<void> {
@@ -298,6 +411,17 @@ function parseDryRun(args: string[]): { dryRun: boolean; values: string[] } {
   const unknown = args.filter((value) => value.startsWith("-") && value !== "--dry-run");
   if (unknown.length > 0) throw new Error(`Unknown option: ${unknown[0]}`);
   return { dryRun: args.includes("--dry-run"), values: args.filter((value) => value !== "--dry-run") };
+}
+
+function parseSetupOptions(args: string[]): { dryRun: boolean; guard: boolean; values: string[] } {
+  const known = new Set(["--dry-run", "--guard"]);
+  const unknown = args.filter((value) => value.startsWith("-") && !known.has(value));
+  if (unknown.length > 0) throw new Error(`Unknown option: ${unknown[0]}`);
+  return {
+    dryRun: args.includes("--dry-run"),
+    guard: args.includes("--guard"),
+    values: args.filter((value) => !known.has(value)),
+  };
 }
 
 function megabytesFromEnvironment(name: string, fallback: number): number {

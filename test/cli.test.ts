@@ -15,7 +15,7 @@ describe("CLI", () => {
     const output = execFileSync(process.execPath, [path.resolve("dist/cli.js"), "--version"], {
       encoding: "utf8",
     });
-    expect(output.trim()).toBe("agent-rewind 0.30.0");
+    expect(output.trim()).toBe("agent-rewind 0.31.0");
   });
 
   it("prints an empty local validation report as JSON", async () => {
@@ -182,6 +182,87 @@ describe("CLI", () => {
     };
     expect(afterUninstall.mcpServers.existing).toBeDefined();
     expect(afterUninstall.mcpServers["filesystem-with-rewind"]).toBeUndefined();
+  });
+
+  it("previews and idempotently completes OpenCode setup with guard mode", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-setup-cli-"));
+    temporaryDirectories.push(directory);
+    const root = path.join(directory, "workspace");
+    const config = path.join(directory, "opencode", "opencode.json");
+    const guard = path.join(directory, "opencode", "plugins", "agent-rewind-guard.js");
+    await mkdir(root);
+    const env = {
+      ...process.env,
+      AGENT_REWIND_OPENCODE_CONFIG: config,
+      AGENT_REWIND_OPENCODE_GUARD: guard,
+    };
+
+    const preview = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [path.resolve("dist/cli.js"), "setup", "opencode", "--guard", "--dry-run", root],
+        { encoding: "utf8", env },
+      ),
+    ) as {
+      dryRun: boolean;
+      client: string;
+      mcp: { filename: string; willChange: boolean };
+      guard: { requested: boolean; willChange: boolean; files: string[] };
+    };
+    expect(preview).toMatchObject({
+      dryRun: true,
+      client: "opencode",
+      mcp: { filename: config, willChange: true },
+      guard: { requested: true, willChange: true, files: [guard] },
+    });
+    await expect(readFile(config, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(guard, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const installed = execFileSync(
+      process.execPath,
+      [path.resolve("dist/cli.js"), "setup", "opencode", "--guard", root],
+      { encoding: "utf8", env },
+    );
+    expect(installed).toContain("Agent Rewind setup complete for OpenCode");
+    expect(installed).toContain("MCP: updated");
+    expect(installed).toContain("Guard: installed");
+    expect(installed).toContain("shell writes remain outside");
+    expect(await readFile(config, "utf8")).toContain("filesystem-with-rewind");
+    expect(await readFile(guard, "utf8")).toContain("tool.execute.before");
+
+    const repeated = execFileSync(
+      process.execPath,
+      [path.resolve("dist/cli.js"), "setup", "opencode", "--guard", root],
+      { encoding: "utf8", env },
+    );
+    expect(repeated).toContain("MCP: already configured");
+    expect(repeated).toContain("Guard: already configured");
+  });
+
+  it("stops setup guard conflicts before writing the MCP configuration", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-rewind-setup-conflict-"));
+    temporaryDirectories.push(directory);
+    const root = path.join(directory, "workspace");
+    const config = path.join(directory, "opencode", "opencode.json");
+    const guard = path.join(directory, "opencode", "plugins", "agent-rewind-guard.js");
+    await mkdir(root);
+    await mkdir(path.dirname(guard), { recursive: true });
+    await writeFile(guard, "// user-managed plugin\n");
+    const env = {
+      ...process.env,
+      AGENT_REWIND_OPENCODE_CONFIG: config,
+      AGENT_REWIND_OPENCODE_GUARD: guard,
+    };
+
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [path.resolve("dist/cli.js"), "setup", "opencode", "--guard", root],
+        { encoding: "utf8", env, stdio: "pipe" },
+      ),
+    ).toThrow();
+    expect(await readFile(guard, "utf8")).toBe("// user-managed plugin\n");
+    await expect(readFile(config, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("installs and removes OpenCode and Codex guards in isolated paths", async () => {
